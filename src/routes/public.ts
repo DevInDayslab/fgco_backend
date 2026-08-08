@@ -1,5 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Request, Response } from "express";
 import { z } from "zod";
 import {
@@ -325,7 +325,7 @@ async function findNominationByNomineeEmail(
   const [row] = await db
     .select()
     .from(nominations)
-    .where(eq(nominations.nomineeEmail, normalized))
+    .where(sql`lower(${nominations.nomineeEmail}) = ${normalized}`)
     .limit(1);
   return row ?? null;
 }
@@ -679,10 +679,23 @@ export async function postNominationLookupByEmail(req: Request, res: Response) {
       return;
     }
 
+    if (existing) {
+      res.status(409).json({
+        ok: false,
+        found: true,
+        error:
+          "A nomination for this email exists but cannot be continued on site in its current state. Use Email me the link, or contact support with your reference ID.",
+        code: "NOT_CONTINUABLE",
+        status: existing.status,
+      });
+      return;
+    }
+
     res.status(404).json({
       ok: false,
       found: false,
-      error: "No incomplete nomination was found for this email.",
+      error:
+        "No incomplete nomination was found for this nominee email. Use the nominee's email (not the nominator's), or submit a new nomination first.",
       code: "NOT_FOUND",
     });
     return;
@@ -705,23 +718,15 @@ export async function postNominationLookupByEmail(req: Request, res: Response) {
     .set({ completionToken, inviteSentAt })
     .where(eq(nominations.id, existing.id));
 
-  sendReferralEmails({
-    nomineeEmail: existing.nomineeEmail,
-    nomineeName: existing.nomineeName,
-    nominatorEmail: existing.nominatorEmail,
-    nominatorName: existing.nominatorName,
-    completionToken,
-    includeNominatorAck: false,
-  });
-
-  // Never return the live token — the nominee must use the emailed secure link.
+  // Continue-on-site: return the token so the client can open the completion page.
+  // Email delivery is handled separately by POST /nominations/resend-link.
   res.status(200).json({
     ok: true,
     found: true,
     nomineeName: existing.nomineeName,
     category: existing.category,
-    message:
-      "A secure completion link has been sent to this email. Open the link from your inbox to continue.",
+    completionToken,
+    completionUrl: buildNominationCompletionUrl(completionToken),
   });
 }
 
