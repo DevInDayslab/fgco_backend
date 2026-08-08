@@ -5,9 +5,23 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
+import { initDatabase, isDbReady } from "./db/index.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
+
+// GoDaddy health probe — must respond 200 before any middleware that could fail
+app.get("/", (_req, res) => {
+  res.status(200).send("OK");
+});
+
+app.get("/health", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "fg-media-hub-api",
+    db: isDbReady(),
+  });
+});
 
 const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
 
@@ -33,10 +47,6 @@ app.use(
   }),
 );
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, service: "fg-media-hub-api" });
-});
-
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
@@ -44,6 +54,19 @@ app.use((_req, res) => {
 const PORT = Number(process.env.PORT) || 3000;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`FG Media Hub API listening on port ${PORT}`);
+  console.log(`Server listening on port ${PORT}`);
   logger.info({ port: PORT, host: "0.0.0.0" }, "FG Media Hub API ready");
+
+  // Non-blocking DB — do not await before listen
+  initDatabase().catch((err) => {
+    logger.error({ err }, "Unexpected error during database initialization");
+  });
+});
+
+process.on("unhandledRejection", (reason) => {
+  logger.error({ reason }, "Unhandled promise rejection");
+});
+
+process.on("uncaughtException", (err) => {
+  logger.error({ err }, "Uncaught exception");
 });
