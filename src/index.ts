@@ -1,15 +1,66 @@
-import "dotenv/config";
+import "./config/load-env.js";
 import cors from "cors";
-import express from "express";
+import express, { type NextFunction, type Request, type Response } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
 import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
+import { requireAdminPasscode } from "./middleware/adminAuth.js";
+import {
+  getDashboard,
+  getInquiryById,
+  getInquiries,
+  getNominationById,
+  getNominations,
+  getPaymentById,
+  getPayments,
+  getSponsorshipById,
+  getSponsorships,
+  patchNomination,
+} from "./routes/admin.js";
+import multer from "multer";
+import { initLocalStorage, getStorageMode } from "./storage/index.js";
+import { getAdminFile } from "./routes/files.js";
+import { postUpload } from "./routes/uploads.js";
+import {
+  postContact,
+  postNomination,
+  postSponsorshipCreateOrder,
+  postSponsorshipPayment,
+  postSponsorshipRegister,
+} from "./routes/public.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
+
+function resolveCorsOrigin(
+  origin: string | undefined,
+  callback: (err: Error | null, allow?: boolean) => void,
+) {
+  if (!origin) {
+    callback(null, true);
+    return;
+  }
+
+  const allowed = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean) ?? [];
+
+  if (allowed.includes(origin)) {
+    callback(null, true);
+    return;
+  }
+
+  if (
+    process.env.NODE_ENV !== "production" &&
+    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
+  ) {
+    callback(null, true);
+    return;
+  }
+
+  callback(null, false);
+}
 
 // GoDaddy health probe — must respond 200 before any middleware that could fail
 app.get("/", (_req, res) => {
@@ -54,8 +105,9 @@ app.use(
 app.use(helmet());
 app.use(
   cors({
-    origin: corsOrigins?.length ? corsOrigins : true,
+    origin: corsOrigins?.length ? resolveCorsOrigin : true,
     credentials: true,
+    allowedHeaders: ["Content-Type", "X-Admin-Passcode"],
   }),
 );
 app.use(
@@ -66,6 +118,74 @@ app.use(
     legacyHeaders: false,
   }),
 );
+app.use(express.json({ limit: "1mb" }));
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024 },
+});
+
+function handleUpload(req: Request, res: Response, next: NextFunction) {
+  upload.single("file")(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        res.status(413).json({ error: "File too large. Maximum upload size is 100MB." });
+        return;
+      }
+      res.status(400).json({ error: err.message });
+      return;
+    }
+    if (err) {
+      res.status(500).json({ error: "Upload failed" });
+      return;
+    }
+    next();
+  });
+}
+
+app.post("/api/uploads", handleUpload, postUpload);
+app.post("/api/contact", postContact);
+app.post("/api/nominations", postNomination);
+app.post("/api/sponsorship/register", postSponsorshipRegister);
+app.post("/api/sponsorship/create-order", postSponsorshipCreateOrder);
+app.post("/api/sponsorship/complete-payment", postSponsorshipPayment);
+
+const adminRouter = express.Router();
+adminRouter.use(requireAdminPasscode);
+adminRouter.get("/dashboard", getDashboard);
+adminRouter.get("/nominations", getNominations);
+adminRouter.get("/nominations/:id", getNominationById);
+adminRouter.patch("/nominations/:id", patchNomination);
+adminRouter.get("/payments", getPayments);
+adminRouter.get("/payments/:id", getPaymentById);
+adminRouter.get("/inquiries", getInquiries);
+adminRouter.get("/inquiries/:id", getInquiryById);
+adminRouter.get("/sponsorships", getSponsorships);
+adminRouter.get("/sponsorships/:id", getSponsorshipById);
+adminRouter.get("/files", getAdminFile);
+
+app.use("/api/admin", adminRouter);
+
+app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) {
+    next(err);
+    return;
+  }
+
+  if (err instanceof multer.MulterError) {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      res.status(413).json({ error: "File too large. Maximum upload size is 100MB." });
+      return;
+    }
+    res.status(400).json({ error: err.message });
+    return;
+  }
+
+  logger.error({ err }, "Unhandled API error");
+  res.status(500).json({
+    error: err instanceof Error ? err.message : "Internal server error",
+  });
+});
 
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
@@ -83,6 +203,14 @@ app.listen(PORT, "0.0.0.0", () => {
   initDatabase().catch((err) => {
     logger.error({ err }, "Unexpected error during database initialization");
   });
+
+  if (getStorageMode() === "local") {
+    initLocalStorage().catch((err: unknown) => {
+      logger.error({ err }, "Failed to initialize local upload directory");
+    });
+  } else {
+    logger.info("Using R2 object storage for uploads");
+  }
 });
 
 process.on("unhandledRejection", (reason) => {

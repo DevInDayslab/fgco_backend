@@ -1,23 +1,17 @@
 import mysql from "mysql2/promise";
 import { drizzle, type MySql2Database } from "drizzle-orm/mysql2";
 import pino from "pino";
+import { getDbCredentials, getMissingDbEnvMessage } from "./credentials.js";
+import * as schema from "./schema.js";
 
 const logger = pino({ name: "fg-media-hub-db" });
 
+type AppDb = MySql2Database<typeof schema>;
+
 let pool: mysql.Pool | null = null;
-let db: MySql2Database | null = null;
+let db: AppDb | null = null;
 let dbReady = false;
 let lastDbError: { error_message: string; error_code: string } | null = null;
-
-function getCpanelDbConfig() {
-  return {
-    host: process.env.CPANEL_DB_HOST?.trim(),
-    user: process.env.CPANEL_DB_USER?.trim(),
-    password: process.env.CPANEL_DB_PASS,
-    database: process.env.CPANEL_DB_NAME?.trim(),
-    port: Number(process.env.CPANEL_DB_PORT) || 3306,
-  };
-}
 
 function captureDbError(err: unknown): { error_message: string; error_code: string } {
   const e = err as { message?: string; code?: string | number };
@@ -39,11 +33,11 @@ export async function getDatabaseHealth(): Promise<DatabaseHealth> {
     if (lastDbError) {
       return { ok: false, ...lastDbError };
     }
-    const { host, user, database } = getCpanelDbConfig();
-    if (!host || !user || !database) {
+    const credentials = getDbCredentials();
+    if (!credentials) {
       return {
         ok: false,
-        error_message: "CPANEL_DB_HOST / CPANEL_DB_USER / CPANEL_DB_NAME not set",
+        error_message: getMissingDbEnvMessage(),
         error_code: "ENV_MISSING",
       };
     }
@@ -68,12 +62,14 @@ export async function getDatabaseHealth(): Promise<DatabaseHealth> {
 
 /** Connect in the background — never throws; API can start without DB. */
 export async function initDatabase(): Promise<boolean> {
-  const { host, user, password, database, port } = getCpanelDbConfig();
+  const credentials = getDbCredentials();
 
-  if (!host || !user || !database) {
-    logger.warn("CPANEL_DB_HOST / CPANEL_DB_USER / CPANEL_DB_NAME not set — running without database");
+  if (!credentials) {
+    logger.warn(getMissingDbEnvMessage() + " — running without database");
     return false;
   }
+
+  const { host, user, password, database, port, source } = credentials;
 
   try {
     pool = mysql.createPool({
@@ -88,9 +84,9 @@ export async function initDatabase(): Promise<boolean> {
     });
 
     await pool.query("SELECT 1");
-    db = drizzle(pool);
+    db = drizzle(pool, { schema, mode: "default" });
     dbReady = true;
-    logger.info({ host, database, port }, "MySQL connection established");
+    logger.info({ host, database, port, source }, "MySQL connection established");
     return true;
   } catch (err) {
     pool = null;
@@ -102,7 +98,7 @@ export async function initDatabase(): Promise<boolean> {
   }
 }
 
-export function getDb(): MySql2Database | null {
+export function getDb(): AppDb | null {
   return db;
 }
 
