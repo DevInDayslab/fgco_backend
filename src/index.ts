@@ -5,7 +5,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
-import { initDatabase, isDbReady } from "./db/index.js";
+import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
@@ -16,12 +16,31 @@ app.get("/", (_req, res) => {
   res.status(200).send("OK");
 });
 
-app.get("/health", (_req, res) => {
-  res.status(200).json({
-    ok: true,
-    service: "fg-media-hub-api",
-    db: isDbReady(),
-  });
+app.get("/health", async (_req, res) => {
+  try {
+    const dbHealth = await getDatabaseHealth();
+
+    res.status(200).json({
+      ok: true,
+      service: "fg-media-hub-api",
+      db: dbHealth.ok,
+      ...(dbHealth.ok
+        ? {}
+        : {
+            error_message: dbHealth.error_message,
+            error_code: dbHealth.error_code,
+          }),
+    });
+  } catch (err) {
+    const e = err as { message?: string; code?: string | number };
+    res.status(200).json({
+      ok: true,
+      service: "fg-media-hub-api",
+      db: false,
+      error_message: e?.message ?? String(err),
+      error_code: String(e?.code ?? "HEALTH_CHECK_FAILED"),
+    });
+  }
 });
 
 const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
