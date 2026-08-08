@@ -4,11 +4,10 @@ import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
-import pinoHttp from "pino-http";
+import { pinoHttp } from "pino-http";
 
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
-const port = Number(process.env.PORT) || 3001;
 
 const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
 
@@ -42,6 +41,9 @@ app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
-app.listen(port, () => {
-  logger.info({ port }, "FG Media Hub API listening");
+const PORT = Number(process.env.PORT) || 3000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`FG Media Hub API listening on port ${PORT}`);
+  logger.info({ port: PORT, host: "0.0.0.0" }, "FG Media Hub API ready");
 });
