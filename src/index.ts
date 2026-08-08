@@ -1,3 +1,5 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import "./config/load-env.js";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
@@ -19,14 +21,27 @@ import {
   getSponsorshipById,
   getSponsorships,
   patchNomination,
+  patchInquiry,
+  patchSponsorship,
+  postSendInvite,
+  postResendCompletionInvite,
 } from "./routes/admin.js";
 import multer from "multer";
 import { initLocalStorage, getStorageMode } from "./storage/index.js";
 import { getAdminFile } from "./routes/files.js";
 import { postUpload } from "./routes/uploads.js";
 import {
+  postApplication,
   postContact,
   postNomination,
+  postNominationComplete,
+  postNominationCreateOrder,
+  postNominationPayment,
+  postNominationRefer,
+  postNominationResendLink,
+  postNominationLookupByEmail,
+  getValidateNominationToken,
+  postPaymentsWebhook,
   postSponsorshipCreateOrder,
   postSponsorshipPayment,
   postSponsorshipRegister,
@@ -51,10 +66,8 @@ function resolveCorsOrigin(
     return;
   }
 
-  if (
-    process.env.NODE_ENV !== "production" &&
-    /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)
-  ) {
+  // Allow any local dev port (Vite, TanStack Start, etc.)
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
     callback(null, true);
     return;
   }
@@ -118,7 +131,23 @@ app.use(
     legacyHeaders: false,
   }),
 );
+app.post(
+  "/api/payments/webhook",
+  express.raw({ type: "application/json" }),
+  postPaymentsWebhook,
+);
+
 app.use(express.json({ limit: "1mb" }));
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+app.use(
+  "/email-assets",
+  express.static(path.resolve(__dirname, "../assets/email"), {
+    maxAge: "7d",
+    fallthrough: false,
+  }),
+);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -146,6 +175,14 @@ function handleUpload(req: Request, res: Response, next: NextFunction) {
 app.post("/api/uploads", handleUpload, postUpload);
 app.post("/api/contact", postContact);
 app.post("/api/nominations", postNomination);
+app.post("/api/nominations/refer", postNominationRefer);
+app.get("/api/nominations/validate-token/:token", getValidateNominationToken);
+app.post("/api/nominations/resend-link", postNominationResendLink);
+app.post("/api/nominations/lookup-by-email", postNominationLookupByEmail);
+app.post("/api/nominations/complete", postNominationComplete);
+app.post("/api/nominations/create-order", postNominationCreateOrder);
+app.post("/api/nominations/complete-payment", postNominationPayment);
+app.post("/api/applications", postApplication);
 app.post("/api/sponsorship/register", postSponsorshipRegister);
 app.post("/api/sponsorship/create-order", postSponsorshipCreateOrder);
 app.post("/api/sponsorship/complete-payment", postSponsorshipPayment);
@@ -160,9 +197,13 @@ adminRouter.get("/payments", getPayments);
 adminRouter.get("/payments/:id", getPaymentById);
 adminRouter.get("/inquiries", getInquiries);
 adminRouter.get("/inquiries/:id", getInquiryById);
+adminRouter.patch("/inquiries/:id", patchInquiry);
 adminRouter.get("/sponsorships", getSponsorships);
 adminRouter.get("/sponsorships/:id", getSponsorshipById);
+adminRouter.patch("/sponsorships/:id", patchSponsorship);
 adminRouter.get("/files", getAdminFile);
+adminRouter.post("/send-invite", postSendInvite);
+adminRouter.post("/nominations/:id/resend-completion", postResendCompletionInvite);
 
 app.use("/api/admin", adminRouter);
 
