@@ -59,7 +59,10 @@ Set variables in GoDaddy’s environment panel (never commit `.env`).
 | `CPANEL_DB_NAME` | Database name |
 | `CPANEL_DB_USER` | Database user |
 | `CPANEL_DB_PASS` | Database password |
-| `ADMIN_PASSCODE` | Passcode for `/api/admin/*` (`X-Admin-Passcode` header) |
+| `ADMIN_USERNAME` | Bootstrap admin username when `admins` is empty (default `admin`) |
+| `ADMIN_PASSWORD` | Bootstrap admin password when `admins` is empty |
+| `ADMIN_PASSCODE` | Optional bootstrap fallback if `ADMIN_PASSWORD` is unset |
+| `ADMIN_JWT_SECRET` | Secret used to sign admin JWTs (required) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outbound email |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Payments (when wired) |
 
@@ -67,7 +70,14 @@ Do **not** set `LOCAL_DB_*` on production unless you intentionally want to overr
 
 ### Frontend admin pairing
 
-Set the same passcode on the frontend:
-
 - `VITE_API_BASE_URL` → your API origin (e.g. `https://api.fgco.in`)
-- `VITE_ADMIN_PASSCODE` → same value as `ADMIN_PASSCODE`
+
+Admin login is username + password against the API. Passwords are never stored in frontend env.
+
+Apply the admins migration on MySQL before first boot:
+
+```bash
+mysql ... < drizzle/0002_admins.sql
+```
+
+The API bootstraps the first admin from `ADMIN_USERNAME` / `ADMIN_PASSWORD` (or `ADMIN_PASSCODE`) when the table is empty. Change the password later under `/admin/settings`.

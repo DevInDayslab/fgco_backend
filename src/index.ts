@@ -7,9 +7,14 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
+import { bootstrapAdminUser } from "./bootstrap/admin.js";
 import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
-import { requireAdminPasscode } from "./middleware/adminAuth.js";
+import {
+  postAdminChangePassword,
+  postAdminLogin,
+  requireAdminAuth,
+} from "./middleware/adminAuth.js";
 import {
   getDashboard,
   getInquiryById,
@@ -120,7 +125,7 @@ app.use(
   cors({
     origin: corsOrigins?.length ? resolveCorsOrigin : true,
     credentials: true,
-    allowedHeaders: ["Content-Type", "X-Admin-Passcode"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   }),
 );
 app.use(
@@ -131,6 +136,14 @@ app.use(
     legacyHeaders: false,
   }),
 );
+
+const adminLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts. Try again later." },
+});
 app.post(
   "/api/payments/webhook",
   express.raw({ type: "application/json" }),
@@ -187,8 +200,11 @@ app.post("/api/sponsorship/register", postSponsorshipRegister);
 app.post("/api/sponsorship/create-order", postSponsorshipCreateOrder);
 app.post("/api/sponsorship/complete-payment", postSponsorshipPayment);
 
+app.post("/api/admin/login", adminLoginLimiter, postAdminLogin);
+
 const adminRouter = express.Router();
-adminRouter.use(requireAdminPasscode);
+adminRouter.use(requireAdminAuth);
+adminRouter.post("/change-password", postAdminChangePassword);
 adminRouter.get("/dashboard", getDashboard);
 adminRouter.get("/nominations", getNominations);
 adminRouter.get("/nominations/:id", getNominationById);
@@ -241,9 +257,18 @@ app.listen(PORT, "0.0.0.0", () => {
   logMailConfigStatus();
 
   // Non-blocking DB — do not await before listen
-  initDatabase().catch((err) => {
-    logger.error({ err }, "Unexpected error during database initialization");
-  });
+  initDatabase()
+    .then(async (ok) => {
+      if (!ok) return;
+      try {
+        await bootstrapAdminUser();
+      } catch (err) {
+        logger.error({ err }, "Admin bootstrap failed");
+      }
+    })
+    .catch((err) => {
+      logger.error({ err }, "Unexpected error during database initialization");
+    });
 
   if (getStorageMode() === "local") {
     initLocalStorage().catch((err: unknown) => {

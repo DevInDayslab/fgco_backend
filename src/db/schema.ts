@@ -8,6 +8,19 @@ import {
   varchar,
 } from "drizzle-orm/mysql-core";
 
+export const admins = mysqlTable(
+  "admins",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    username: varchar("username", { length: 255 }).notNull(),
+    passwordHash: varchar("password_hash", { length: 255 }).notNull(),
+    tokenVersion: int("token_version").notNull().default(1),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
+  },
+  (table) => [uniqueIndex("admins_username_uidx").on(table.username)],
+);
+
 export const payments = mysqlTable("payments", {
   id: varchar("id", { length: 36 }).primaryKey(),
   type: mysqlEnum("type", ["nomination", "sponsorship"]).notNull(),
