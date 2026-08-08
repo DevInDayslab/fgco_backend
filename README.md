@@ -14,7 +14,7 @@ The server binds to `0.0.0.0` so container hosts can reach it.
 
 Copy `backend/.env.example` to `backend/.env` locally, or set the same variables in GoDaddy’s environment panel (never commit `.env`).
 
-**Required for DB:** `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASS`  
+**Required for DB:** `CPANEL_DB_HOST`, `CPANEL_DB_PORT`, `CPANEL_DB_NAME`, `CPANEL_DB_USER`, `CPANEL_DB_PASS`  
 **Required for email:** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM`
 
 ## Setup

@@ -9,6 +9,16 @@ let db: MySql2Database | null = null;
 let dbReady = false;
 let lastDbError: { error_message: string; error_code: string } | null = null;
 
+function getCpanelDbConfig() {
+  return {
+    host: process.env.CPANEL_DB_HOST?.trim(),
+    user: process.env.CPANEL_DB_USER?.trim(),
+    password: process.env.CPANEL_DB_PASS,
+    database: process.env.CPANEL_DB_NAME?.trim(),
+    port: Number(process.env.CPANEL_DB_PORT) || 3306,
+  };
+}
+
 function captureDbError(err: unknown): { error_message: string; error_code: string } {
   const e = err as { message?: string; code?: string | number };
   return {
@@ -29,13 +39,11 @@ export async function getDatabaseHealth(): Promise<DatabaseHealth> {
     if (lastDbError) {
       return { ok: false, ...lastDbError };
     }
-    const host = process.env.DB_HOST?.trim();
-    const user = process.env.DB_USER?.trim();
-    const database = process.env.DB_NAME?.trim();
+    const { host, user, database } = getCpanelDbConfig();
     if (!host || !user || !database) {
       return {
         ok: false,
-        error_message: "DB_HOST / DB_USER / DB_NAME not set",
+        error_message: "CPANEL_DB_HOST / CPANEL_DB_USER / CPANEL_DB_NAME not set",
         error_code: "ENV_MISSING",
       };
     }
@@ -60,24 +68,20 @@ export async function getDatabaseHealth(): Promise<DatabaseHealth> {
 
 /** Connect in the background — never throws; API can start without DB. */
 export async function initDatabase(): Promise<boolean> {
-  const host = process.env.DB_HOST?.trim();
-  const user = process.env.DB_USER?.trim();
-  const password = process.env.DB_PASS;
-  const database = process.env.DB_NAME?.trim();
-  const port = Number(process.env.DB_PORT) || 3306;
+  const { host, user, password, database, port } = getCpanelDbConfig();
 
   if (!host || !user || !database) {
-    logger.warn("DB_HOST / DB_USER / DB_NAME not set — running without database");
+    logger.warn("CPANEL_DB_HOST / CPANEL_DB_USER / CPANEL_DB_NAME not set — running without database");
     return false;
   }
 
   try {
     pool = mysql.createPool({
       host,
-      port,
       user,
       password,
       database,
+      port,
       waitForConnections: true,
       connectionLimit: 10,
       connectTimeout: 10000,
