@@ -1,5 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { eq, or, sql } from "drizzle-orm";
 import type { Request, Response } from "express";
 import { z } from "zod";
 import {
@@ -322,12 +322,38 @@ async function findNominationByNomineeEmail(
   nomineeEmail: string,
 ) {
   const normalized = normalizeEmail(nomineeEmail);
-  const [row] = await db
+
+  // Match column OR form_data.nomineeEmail (admin UI already falls back to form_data).
+  const matches = await db
     .select()
     .from(nominations)
-    .where(sql`lower(${nominations.nomineeEmail}) = ${normalized}`)
-    .limit(1);
-  return row ?? null;
+    .where(
+      or(
+        eq(nominations.nomineeEmail, normalized),
+        sql`lower(json_unquote(json_extract(${nominations.formData}, '$.nomineeEmail'))) = ${normalized}`,
+      ),
+    );
+
+  if (matches.length === 0) return null;
+
+  const preferred =
+    matches.find((row) => row.status === "referral_pending" && row.paymentStatus !== "paid") ??
+    matches.find((row) => row.status === "referral_pending") ??
+    matches[0];
+
+  if (
+    preferred.status === "referral_pending" &&
+    preferred.paymentStatus !== "paid" &&
+    normalizeEmail(preferred.nomineeEmail || "") !== normalized
+  ) {
+    await db
+      .update(nominations)
+      .set({ nomineeEmail: normalized })
+      .where(eq(nominations.id, preferred.id));
+    return { ...preferred, nomineeEmail: normalized };
+  }
+
+  return preferred;
 }
 
 function sendReferralEmails(params: {
