@@ -6,6 +6,7 @@ import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
 import { initDatabase, isDbReady } from "./db/index.js";
+import { logMailConfigStatus } from "./config/mail.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
@@ -56,6 +57,8 @@ const PORT = Number(process.env.PORT) || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server listening on port ${PORT}`);
   logger.info({ port: PORT, host: "0.0.0.0" }, "FG Media Hub API ready");
+
+  logMailConfigStatus();
 
   // Non-blocking DB — do not await before listen
   initDatabase().catch((err) => {
