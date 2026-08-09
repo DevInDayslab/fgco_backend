@@ -5,11 +5,19 @@ export function isResendConfigured(): boolean {
   return getResendConfig() !== null;
 }
 
+type ResendAttachment = {
+  filename: string;
+  content: Buffer;
+  contentType?: string;
+  inlineContentId?: string;
+};
+
 export async function sendViaResend(input: {
   to: string;
   subject: string;
   html: string;
   text: string;
+  attachments?: ResendAttachment[];
 }): Promise<{ messageId: string; provider: "resend" }> {
   const cfg = getResendConfig();
   if (!cfg) {
@@ -24,6 +32,7 @@ export async function sendViaResend(input: {
     subject: input.subject,
     html: input.html,
     text: input.text,
+    ...(input.attachments?.length ? { attachments: input.attachments } : {}),
   });
 
   if (result.error) {

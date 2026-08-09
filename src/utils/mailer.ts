@@ -1,6 +1,3 @@
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 import pino from "pino";
@@ -14,7 +11,13 @@ import {
   isLocalSmtpHostName,
   type MailTransportProfile,
 } from "../config/mail.js";
-import { RAMESH_EMAIL_IMAGE_CID } from "./templates.js";
+import {
+  buildNodemailerCeoAttachments,
+  buildResendCeoAttachments,
+  ceoImageExists,
+  htmlUsesCeoImage,
+  RAMESH_EMAIL_IMAGE_PATH,
+} from "./email-attachments.js";
 import { isResendConfigured, sendViaResend, verifyResendConnection } from "./resend-mailer.js";
 
 const logger = pino({ name: "fg-media-hub-mailer" });
@@ -23,9 +26,7 @@ let activeProfile: MailTransportProfile | null = null;
 let transporter: Transporter | null = null;
 let sendQueue: Promise<void> = Promise.resolve();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-export const RAMESH_EMAIL_IMAGE_PATH = path.resolve(__dirname, "../../assets/email/ramesh.jpg");
+export { RAMESH_EMAIL_IMAGE_PATH } from "./email-attachments.js";
 
 function mailConsole(message: string, details?: Record<string, unknown>) {
   const suffix = details ? ` ${JSON.stringify(details)}` : "";
@@ -126,25 +127,15 @@ function getMissingMailEnvVars(): string[] {
 }
 
 function buildInlineAttachments(html: string) {
-  if (!html.includes(`cid:${RAMESH_EMAIL_IMAGE_CID}`)) {
+  const attachments = buildNodemailerCeoAttachments(html);
+  if (!attachments) {
+    if (htmlUsesCeoImage(html)) {
+      logger.warn({ path: RAMESH_EMAIL_IMAGE_PATH }, "CEO email image missing — sending without photo");
+      mailConsole("CEO email image missing", { path: RAMESH_EMAIL_IMAGE_PATH });
+    }
     return undefined;
   }
-
-  if (!fs.existsSync(RAMESH_EMAIL_IMAGE_PATH)) {
-    logger.warn({ path: RAMESH_EMAIL_IMAGE_PATH }, "CEO email image missing — sending without photo");
-    mailConsole("CEO email image missing", { path: RAMESH_EMAIL_IMAGE_PATH });
-    return undefined;
-  }
-
-  return [
-    {
-      filename: "ramesh.jpg",
-      path: RAMESH_EMAIL_IMAGE_PATH,
-      cid: RAMESH_EMAIL_IMAGE_CID,
-      contentType: "image/jpeg",
-      contentDisposition: "inline" as const,
-    },
-  ];
+  return attachments;
 }
 
 async function verifyProfile(profile: MailTransportProfile): Promise<void> {
@@ -383,7 +374,7 @@ export async function verifySmtpConnection(): Promise<{
 export async function getMailDiagnostics(options?: { verify?: boolean }) {
   const cfg = getMailConfig();
   const missing = getMissingMailEnvVars();
-  const ceoImageExists = fs.existsSync(RAMESH_EMAIL_IMAGE_PATH);
+  const ceoImageExistsFlag = ceoImageExists();
   const profiles = getSmtpTransportProfiles();
 
   const base = {
@@ -400,7 +391,7 @@ export async function getMailDiagnostics(options?: { verify?: boolean }) {
     from: cfg?.from ?? null,
     fromName: cfg?.fromName ?? null,
     passSet: Boolean(process.env.SMTP_PASS),
-    ceoImageExists,
+    ceoImageExists: ceoImageExistsFlag,
     ceoImagePath: RAMESH_EMAIL_IMAGE_PATH,
     nodeEnv: process.env.NODE_ENV ?? "unknown",
     activeProfile: activeProfile
@@ -438,8 +429,14 @@ export async function sendEmailDetailed(
   if (isResendConfigured()) {
     try {
       const text = htmlToPlainText(html);
-      mailConsole("RESEND send start", { to, subject });
-      const result = await sendViaResend({ to, subject, html, text });
+      mailConsole("RESEND send start", { to, subject, hasCeoImage: Boolean(buildResendCeoAttachments(html)) });
+      const result = await sendViaResend({
+        to,
+        subject,
+        html,
+        text,
+        attachments: buildResendCeoAttachments(html),
+      });
       mailConsole("RESEND send ok", { to, subject, messageId: result.messageId });
       return {
         sent: true,
