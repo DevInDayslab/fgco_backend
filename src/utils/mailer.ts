@@ -4,11 +4,17 @@ import { fileURLToPath } from "node:url";
 import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 import pino from "pino";
-import { getMailConfig, type MailConfig } from "../config/mail.js";
+import {
+  getMailConfig,
+  getSmtpEaccesHint,
+  getSmtpTransportProfiles,
+  type MailTransportProfile,
+} from "../config/mail.js";
 import { RAMESH_EMAIL_IMAGE_CID } from "./templates.js";
 
 const logger = pino({ name: "fg-media-hub-mailer" });
 
+let activeProfile: MailTransportProfile | null = null;
 let transporter: Transporter | null = null;
 let sendQueue: Promise<void> = Promise.resolve();
 
@@ -19,6 +25,10 @@ export const RAMESH_EMAIL_IMAGE_PATH = path.resolve(__dirname, "../../assets/ema
 function mailConsole(message: string, details?: Record<string, unknown>) {
   const suffix = details ? ` ${JSON.stringify(details)}` : "";
   console.log(`[mail] ${message}${suffix}`);
+}
+
+function profileKey(profile: MailTransportProfile): string {
+  return `${profile.label}:${profile.host}:${profile.port}:${profile.secure}`;
 }
 
 function resetTransporter() {
@@ -32,14 +42,14 @@ function resetTransporter() {
   transporter = null;
 }
 
-function createTransporter(cfg: MailConfig): Transporter {
+function createTransporter(profile: MailTransportProfile): Transporter {
   return nodemailer.createTransport({
-    host: cfg.host,
-    port: cfg.port,
-    secure: cfg.secure,
+    host: profile.host,
+    port: profile.port,
+    secure: profile.secure,
     auth: {
-      user: cfg.user,
-      pass: cfg.pass,
+      user: profile.user,
+      pass: profile.pass,
     },
     pool: false,
     maxConnections: 1,
@@ -49,19 +59,26 @@ function createTransporter(cfg: MailConfig): Transporter {
     family: 4,
     tls: {
       minVersion: "TLSv1.2",
-      servername: cfg.host,
+      servername: profile.tlsServername,
+      rejectUnauthorized: profile.rejectUnauthorized,
     },
   } as nodemailer.TransportOptions);
 }
 
-function getTransporter(): Transporter | null {
-  if (transporter) return transporter;
+function getTransporterForProfile(profile: MailTransportProfile): Transporter {
+  if (activeProfile && transporter && profileKey(activeProfile) === profileKey(profile)) {
+    return transporter;
+  }
 
-  const cfg = getMailConfig();
-  if (!cfg) return null;
-
-  transporter = createTransporter(cfg);
+  resetTransporter();
+  activeProfile = profile;
+  transporter = createTransporter(profile);
   return transporter;
+}
+
+function isBlockedOutboundSmtpError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  return code === "EACCES" || code === "EPERM";
 }
 
 function isRetryableSmtpError(error: unknown) {
@@ -72,7 +89,8 @@ function isRetryableSmtpError(error: unknown) {
     code === "ETIMEDOUT" ||
     code === "ECONNRESET" ||
     code === "EPIPE" ||
-    code === "EENVELOPE"
+    code === "EENVELOPE" ||
+    isBlockedOutboundSmtpError(error)
   );
 }
 
@@ -124,12 +142,86 @@ function buildInlineAttachments(html: string) {
   ];
 }
 
+async function verifyProfile(profile: MailTransportProfile): Promise<void> {
+  const transport = createTransporter(profile);
+  try {
+    await transport.verify();
+  } finally {
+    try {
+      transport.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
+async function sendWithProfile(
+  profile: MailTransportProfile,
+  mail: { from: string; to: string; subject: string; html: string; attachments?: ReturnType<typeof buildInlineAttachments> },
+) {
+  const transport = getTransporterForProfile(profile);
+  return transport.sendMail({
+    from: mail.from,
+    to: mail.to,
+    subject: mail.subject,
+    html: mail.html,
+    ...(mail.attachments ? { attachments: mail.attachments } : {}),
+  });
+}
+
+async function resolveWorkingProfile(
+  purpose: "verify" | "send",
+): Promise<{ profile: MailTransportProfile; attempted: string[] }> {
+  const profiles = getSmtpTransportProfiles();
+  if (profiles.length === 0) {
+    throw new Error(`SMTP not configured — missing: ${getMissingMailEnvVars().join(", ") || "unknown"}`);
+  }
+
+  if (purpose === "send" && activeProfile) {
+    return { profile: activeProfile, attempted: [profileKey(activeProfile)] };
+  }
+
+  const attempted: string[] = [];
+  let lastError: unknown;
+
+  for (const profile of profiles) {
+    attempted.push(profileKey(profile));
+    try {
+      await verifyProfile(profile);
+      mailConsole(`${purpose.toUpperCase()} profile OK`, {
+        label: profile.label,
+        host: profile.host,
+        port: profile.port,
+        secure: profile.secure,
+        tlsServername: profile.tlsServername,
+      });
+      activeProfile = profile;
+      return { profile, attempted };
+    } catch (error) {
+      lastError = error;
+      const meta = smtpErrorMeta(error);
+      mailConsole(`${purpose.toUpperCase()} profile failed`, {
+        label: profile.label,
+        host: profile.host,
+        port: profile.port,
+        ...meta,
+      });
+      resetTransporter();
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("All SMTP profiles failed");
+}
+
 export async function verifySmtpConnection(): Promise<{
   ok: boolean;
   durationMs: number;
   host?: string;
   port?: number;
   user?: string;
+  label?: string;
+  attemptedProfiles?: string[];
+  hint?: string | null;
   error?: string;
   smtp?: ReturnType<typeof smtpErrorMeta>;
 }> {
@@ -143,45 +235,50 @@ export async function verifySmtpConnection(): Promise<{
   }
 
   const started = Date.now();
-  const transport = createTransporter(cfg);
+  activeProfile = null;
+  resetTransporter();
 
   try {
-    await transport.verify();
+    const { profile, attempted } = await resolveWorkingProfile("verify");
     const durationMs = Date.now() - started;
     mailConsole("SMTP verify OK", {
-      host: cfg.host,
-      port: cfg.port,
-      user: cfg.user,
+      label: profile.label,
+      host: profile.host,
+      port: profile.port,
+      user: profile.user,
       durationMs,
+      attemptedProfiles: attempted,
     });
-    logger.info({ host: cfg.host, port: cfg.port, user: cfg.user, durationMs }, "SMTP verify OK");
-    transport.close();
+    logger.info(
+      { label: profile.label, host: profile.host, port: profile.port, user: profile.user, durationMs },
+      "SMTP verify OK",
+    );
     return {
       ok: true,
       durationMs,
-      host: cfg.host,
-      port: cfg.port,
-      user: cfg.user,
+      host: profile.host,
+      port: profile.port,
+      user: profile.user,
+      label: profile.label,
+      attemptedProfiles: attempted,
     };
   } catch (error) {
     const durationMs = Date.now() - started;
     const smtp = smtpErrorMeta(error);
     const errorMessage = smtp.message ?? "SMTP verify failed";
-    mailConsole("SMTP verify FAILED", { ...smtp, host: cfg.host, port: cfg.port, durationMs });
-    logger.error({ err: error, smtp, host: cfg.host, port: cfg.port, durationMs }, "SMTP verify failed");
-    try {
-      transport.close();
-    } catch {
-      // ignore
-    }
+    const hint = isBlockedOutboundSmtpError(error) ? getSmtpEaccesHint(cfg.host) : null;
+    mailConsole("SMTP verify FAILED (all profiles)", { ...smtp, host: cfg.host, port: cfg.port, durationMs, hint });
+    logger.error({ err: error, smtp, host: cfg.host, port: cfg.port, durationMs, hint }, "SMTP verify failed");
     return {
       ok: false,
       durationMs,
       host: cfg.host,
       port: cfg.port,
       user: cfg.user,
-      error: errorMessage,
+      hint,
+      error: hint ? `${errorMessage} — ${hint}` : errorMessage,
       smtp,
+      attemptedProfiles: getSmtpTransportProfiles().map((p) => profileKey(p)),
     };
   }
 }
@@ -190,6 +287,7 @@ export async function getMailDiagnostics(options?: { verify?: boolean }) {
   const cfg = getMailConfig();
   const missing = getMissingMailEnvVars();
   const ceoImageExists = fs.existsSync(RAMESH_EMAIL_IMAGE_PATH);
+  const profiles = getSmtpTransportProfiles();
 
   const base = {
     configured: Boolean(cfg),
@@ -204,6 +302,23 @@ export async function getMailDiagnostics(options?: { verify?: boolean }) {
     ceoImageExists,
     ceoImagePath: RAMESH_EMAIL_IMAGE_PATH,
     nodeEnv: process.env.NODE_ENV ?? "unknown",
+    activeProfile: activeProfile
+      ? {
+          label: activeProfile.label,
+          host: activeProfile.host,
+          port: activeProfile.port,
+          secure: activeProfile.secure,
+          tlsServername: activeProfile.tlsServername,
+        }
+      : null,
+    transportProfiles: profiles.map((p) => ({
+      label: p.label,
+      host: p.host,
+      port: p.port,
+      secure: p.secure,
+      tlsServername: p.tlsServername,
+    })),
+    eaccesHint: getSmtpEaccesHint(cfg?.host),
   };
 
   if (!options?.verify) {
@@ -222,29 +337,43 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
     return false;
   }
 
-  const mailCfg = cfg;
-  const fromAddress = `"${mailCfg.fromName}" <${mailCfg.from}>`;
+  const fromAddress = `"${cfg.fromName}" <${cfg.from}>`;
   const attachments = buildInlineAttachments(html);
 
-  async function attempt(retrying: boolean): Promise<boolean> {
-    const transport = getTransporter();
-    if (!transport) {
-      logger.warn({ to, subject }, "SMTP not configured — email skipped");
-      mailConsole("SKIP — no transporter", { to, subject });
-      return false;
-    }
-
+  async function attempt(retrying: boolean, tryAllProfiles: boolean): Promise<boolean> {
     try {
-      mailConsole("SEND start", { to, subject, retrying, host: mailCfg.host });
-      const info = await transport.sendMail({
+      if (tryAllProfiles) {
+        activeProfile = null;
+        resetTransporter();
+      }
+
+      const { profile } = await resolveWorkingProfile("send");
+      mailConsole("SEND start", {
+        to,
+        subject,
+        retrying,
+        label: profile.label,
+        host: profile.host,
+        port: profile.port,
+      });
+
+      const info = await sendWithProfile(profile, {
         from: fromAddress,
         to,
         subject,
         html,
-        ...(attachments ? { attachments } : {}),
+        attachments,
       });
+
       logger.info(
-        { to, subject, messageId: info.messageId, attachedCeoPhoto: Boolean(attachments) },
+        {
+          to,
+          subject,
+          messageId: info.messageId,
+          attachedCeoPhoto: Boolean(attachments),
+          profile: profile.label,
+          host: profile.host,
+        },
         "Email sent",
       );
       mailConsole("SEND ok", {
@@ -252,27 +381,30 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
         subject,
         messageId: info.messageId,
         attachedCeoPhoto: Boolean(attachments),
+        profile: profile.label,
+        host: profile.host,
       });
       return true;
     } catch (error) {
       const meta = smtpErrorMeta(error);
-      logger.warn({ err: meta, to, subject, retrying }, "SMTP send failed");
-      mailConsole("SEND failed", { to, subject, retrying, ...meta });
+      logger.warn({ err: meta, to, subject, retrying, tryAllProfiles }, "SMTP send failed");
+      mailConsole("SEND failed", { to, subject, retrying, tryAllProfiles, ...meta });
 
       if (!retrying && isRetryableSmtpError(error)) {
-        logger.warn({ to, subject }, "SMTP connection error — retrying with fresh connection");
-        mailConsole("SEND retry with fresh connection", { to, subject });
+        mailConsole("SEND retry with alternate SMTP profile(s)", { to, subject });
         resetTransporter();
-        return attempt(true);
+        activeProfile = null;
+        return attempt(true, true);
       }
 
       logger.error({ err: error, ...meta, to, subject }, "Error sending email");
       resetTransporter();
+      activeProfile = null;
       return false;
     }
   }
 
-  return attempt(false);
+  return attempt(false, false);
 }
 
 export async function sendSimpleTestEmail(to: string): Promise<{
@@ -280,6 +412,9 @@ export async function sendSimpleTestEmail(to: string): Promise<{
   subject: string;
   messageId?: string;
   error?: string;
+  hint?: string | null;
+  profile?: string;
+  host?: string;
   smtp?: ReturnType<typeof smtpErrorMeta>;
 }> {
   const subject = `FG Media Hub SMTP test — ${new Date().toISOString()}`;
@@ -294,24 +429,45 @@ export async function sendSimpleTestEmail(to: string): Promise<{
     };
   }
 
-  const transport = createTransporter(cfg);
   const fromAddress = `"${cfg.fromName}" <${cfg.from}>`;
 
   try {
-    mailConsole("TEST SEND start", { to, host: cfg.host, port: cfg.port });
-    const info = await transport.sendMail({ from: fromAddress, to, subject, html });
-    mailConsole("TEST SEND ok", { to, messageId: info.messageId });
-    transport.close();
-    return { sent: true, subject, messageId: info.messageId };
+    activeProfile = null;
+    resetTransporter();
+    const { profile } = await resolveWorkingProfile("send");
+    mailConsole("TEST SEND start", {
+      to,
+      label: profile.label,
+      host: profile.host,
+      port: profile.port,
+    });
+    const info = await sendWithProfile(profile, {
+      from: fromAddress,
+      to,
+      subject,
+      html,
+    });
+    mailConsole("TEST SEND ok", { to, messageId: info.messageId, profile: profile.label, host: profile.host });
+    return {
+      sent: true,
+      subject,
+      messageId: info.messageId,
+      profile: profile.label,
+      host: profile.host,
+    };
   } catch (error) {
     const smtp = smtpErrorMeta(error);
-    mailConsole("TEST SEND failed", { to, ...smtp });
-    try {
-      transport.close();
-    } catch {
-      // ignore
-    }
-    return { sent: false, subject, error: smtp.message ?? "Test send failed", smtp };
+    const hint = isBlockedOutboundSmtpError(error) ? getSmtpEaccesHint(cfg.host) : null;
+    mailConsole("TEST SEND failed", { to, ...smtp, hint });
+    resetTransporter();
+    activeProfile = null;
+    return {
+      sent: false,
+      subject,
+      error: hint ? `${smtp.message ?? "Test send failed"} — ${hint}` : smtp.message ?? "Test send failed",
+      hint,
+      smtp,
+    };
   }
 }
 
@@ -339,7 +495,9 @@ export async function runStartupMailCheck(): Promise<void> {
     user: diagnostics.user,
     from: diagnostics.from,
     ceoImageExists: diagnostics.ceoImageExists,
+    profiles: diagnostics.transportProfiles,
     verifyOk: "verify" in diagnostics ? diagnostics.verify?.ok : undefined,
     verifyError: "verify" in diagnostics ? diagnostics.verify?.error : undefined,
+    activeProfile: diagnostics.activeProfile,
   });
 }
