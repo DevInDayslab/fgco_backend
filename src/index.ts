@@ -1,7 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import "./config/load-env.js";
-import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -10,6 +9,7 @@ import { pinoHttp } from "pino-http";
 import { bootstrapAdminUser } from "./bootstrap/admin.js";
 import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
+import { corsMiddleware } from "./middleware/cors.js";
 import {
   postAdminChangePassword,
   postAdminLogin,
@@ -49,37 +49,6 @@ import {
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
 
-function resolveCorsOrigin(
-  origin: string | undefined,
-  callback: (err: Error | null, allow?: boolean) => void,
-) {
-  if (!origin) {
-    callback(null, true);
-    return;
-  }
-
-  const allowed = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean) ?? [];
-
-  if (allowed.includes(origin)) {
-    callback(null, true);
-    return;
-  }
-
-  // FG Media production frontends (apex, www, subdomains)
-  if (/^https:\/\/([a-z0-9-]+\.)*fgco\.in$/i.test(origin)) {
-    callback(null, true);
-    return;
-  }
-
-  // Allow any local dev port (Vite, TanStack Start, etc.)
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-    callback(null, true);
-    return;
-  }
-
-  callback(null, false);
-}
-
 // GoDaddy health probe — must respond 200 before any middleware that could fail
 app.get("/", (_req, res) => {
   res.status(200).send("OK");
@@ -112,6 +81,9 @@ app.get("/health", async (_req, res) => {
   }
 });
 
+// CORS before helmet/rate-limit so preflight always gets ACAO headers.
+app.use(corsMiddleware);
+
 app.use(
   pinoHttp({
     logger,
@@ -124,13 +96,7 @@ app.use(
     crossOriginResourcePolicy: { policy: "cross-origin" },
   }),
 );
-app.use(
-  cors({
-    origin: resolveCorsOrigin,
-    credentials: true,
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);
+
 app.use(
   rateLimit({
     windowMs: 15 * 60 * 1000,
