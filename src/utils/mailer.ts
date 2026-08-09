@@ -36,19 +36,17 @@ function createTransporter(cfg: MailConfig): Transporter {
       user: cfg.user,
       pass: cfg.pass,
     },
-    // Avoid stale pooled sockets on long-running hosts (common with cPanel SMTP).
     pool: false,
     maxConnections: 1,
     connectionTimeout: 30_000,
     greetingTimeout: 30_000,
     socketTimeout: 60_000,
-    // Prefer IPv4 — some VPS/Docker hosts fail resolving/connecting over IPv6.
     family: 4,
     tls: {
       minVersion: "TLSv1.2",
       servername: cfg.host,
     },
-  });
+  } as nodemailer.TransportOptions);
 }
 
 function getTransporter(): Transporter | null {

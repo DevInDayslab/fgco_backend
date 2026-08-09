@@ -29,7 +29,6 @@ import {
   patchInquiry,
   patchSponsorship,
   postSendInvite,
-  postResendCompletionInvite,
 } from "./routes/admin.js";
 import multer from "multer";
 import { initLocalStorage, getStorageMode } from "./storage/index.js";
@@ -37,15 +36,10 @@ import { getAdminFile } from "./routes/files.js";
 import { postUpload } from "./routes/uploads.js";
 import {
   postApplication,
+  postCheckNomineeEmail,
   postContact,
-  postNomination,
-  postNominationComplete,
   postNominationCreateOrder,
   postNominationPayment,
-  postNominationRefer,
-  postNominationResendLink,
-  postNominationLookupByEmail,
-  getValidateNominationToken,
   postPaymentsWebhook,
   postSponsorshipCreateOrder,
   postSponsorshipPayment,
@@ -187,14 +181,9 @@ function handleUpload(req: Request, res: Response, next: NextFunction) {
 
 app.post("/api/uploads", handleUpload, postUpload);
 app.post("/api/contact", postContact);
-app.post("/api/nominations", postNomination);
-app.post("/api/nominations/refer", postNominationRefer);
-app.get("/api/nominations/validate-token/:token", getValidateNominationToken);
-app.post("/api/nominations/resend-link", postNominationResendLink);
-app.post("/api/nominations/lookup-by-email", postNominationLookupByEmail);
-app.post("/api/nominations/complete", postNominationComplete);
 app.post("/api/nominations/create-order", postNominationCreateOrder);
 app.post("/api/nominations/complete-payment", postNominationPayment);
+app.post("/api/nominations/check-email", postCheckNomineeEmail);
 app.post("/api/applications", postApplication);
 app.post("/api/sponsorship/register", postSponsorshipRegister);
 app.post("/api/sponsorship/create-order", postSponsorshipCreateOrder);
@@ -219,7 +208,6 @@ adminRouter.get("/sponsorships/:id", getSponsorshipById);
 adminRouter.patch("/sponsorships/:id", patchSponsorship);
 adminRouter.get("/files", getAdminFile);
 adminRouter.post("/send-invite", postSendInvite);
-adminRouter.post("/nominations/:id/resend-completion", postResendCompletionInvite);
 
 app.use("/api/admin", adminRouter);
 

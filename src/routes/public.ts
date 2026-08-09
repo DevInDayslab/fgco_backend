@@ -1,6 +1,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { eq, or, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Request, Response } from "express";
+import pino from "pino";
 import { z } from "zod";
 import {
   getNominationFeeWithGstPaise,
@@ -23,24 +24,18 @@ import {
   payments,
   sponsorshipReservations,
 } from "../db/schema.js";
-import { sendEmailAsync } from "../utils/mailer.js";
+import { sendEmail, sendEmailAsync } from "../utils/mailer.js";
+import { getNomineeEmail, isSelfNomination } from "../utils/nomination-email.js";
 import {
-  getNomineeEmail,
-  getNomineePhone,
-  hasNominationAttachments,
-  isSelfNomination,
-} from "../utils/nomination-email.js";
-import {
-  buildNominationCompletionUrl,
-  formatAwardDate,
-  formatAwardDateTime,
   getApplicationReceivedEmail,
   getCeoNominationEmail,
   getNominantAcknowledgementEmail,
-  getNominatorNomineeCompletedEmail,
+  getNomineeNominationAcknowledgementEmail,
   getPaymentReceiptEmail,
   getSponsorshipConfirmationEmail,
 } from "../utils/templates.js";
+
+const nominationEmailLogger = pino({ name: "fg-media-hub-nomination-emails" });
 
 const contactSchema = z.object({
   name: z.string().min(1).max(255),
@@ -48,41 +43,6 @@ const contactSchema = z.object({
   company: z.string().max(255).optional(),
   inquiryType: z.string().max(128).optional(),
   message: z.string().min(1).max(5000),
-});
-
-const referralNominationSchema = z.object({
-  nominatorName: z.string().min(1).max(255),
-  nominatorOrg: z.string().max(255).optional(),
-  nominatorEmail: z.string().email().max(255),
-  nominatorPhone: z.string().min(10).max(32),
-  relationship: z.string().min(1).max(128),
-  nomineeType: z.string().min(1).max(128),
-  nomineeName: z.string().min(1).max(255),
-  nomineeDesignation: z.string().max(255).optional(),
-  nomineeEmail: z.string().email().max(255),
-  nomineePhone: z.string().min(10).max(32),
-  nomineeLocation: z.string().min(1).max(255),
-  nomineeSocial: z.string().max(512).optional(),
-  category: z.string().min(1).max(255),
-  publications: z.array(z.string()).min(1),
-  executiveSummary: z.string().max(5000).optional(),
-  achievement: z.string().max(10000).optional(),
-  impact: z.string().max(10000).optional(),
-  futureGoals: z.string().max(10000).optional(),
-});
-
-const resendCompletionLinkSchema = z.object({
-  email: z.string().email().max(255),
-});
-
-const completeNominationSchema = z.object({
-  token: z.string().min(1).max(64),
-  paymentId: z.string().uuid(),
-  profilePhotoKey: z.string().min(1).max(512),
-  supportingDocsKey: z.string().max(512).optional(),
-  videoKey: z.string().max(512).optional(),
-  altVideoLink: z.string().max(512).optional(),
-  formData: z.record(z.unknown()).optional(),
 });
 
 const applicationSchema = z.object({
@@ -322,84 +282,129 @@ async function findNominationByNomineeEmail(
   nomineeEmail: string,
 ) {
   const normalized = normalizeEmail(nomineeEmail);
-
-  // Match column OR form_data.nomineeEmail (admin UI already falls back to form_data).
-  const matches = await db
+  const [row] = await db
     .select()
     .from(nominations)
-    .where(
-      or(
-        eq(nominations.nomineeEmail, normalized),
-        sql`lower(json_unquote(json_extract(${nominations.formData}, '$.nomineeEmail'))) = ${normalized}`,
-      ),
-    );
-
-  if (matches.length === 0) return null;
-
-  const preferred =
-    matches.find((row) => row.status === "referral_pending" && row.paymentStatus !== "paid") ??
-    matches.find((row) => row.status === "referral_pending") ??
-    matches[0];
-
-  if (
-    preferred.status === "referral_pending" &&
-    preferred.paymentStatus !== "paid" &&
-    normalizeEmail(preferred.nomineeEmail || "") !== normalized
-  ) {
-    await db
-      .update(nominations)
-      .set({ nomineeEmail: normalized })
-      .where(eq(nominations.id, preferred.id));
-    return { ...preferred, nomineeEmail: normalized };
-  }
-
-  return preferred;
+    .where(eq(nominations.nomineeEmail, normalized))
+    .limit(1);
+  return row ?? null;
 }
 
-function sendReferralEmails(params: {
-  nomineeEmail: string;
+function queueApplicationEmails(params: {
+  isSelf: boolean;
   nomineeName: string;
-  nominatorEmail: string;
+  nomineeEmail: string;
   nominatorName: string;
-  completionToken: string;
-  includeNominatorAck?: boolean;
+  nominatorEmail: string;
+  category: string;
+  paymentId?: string;
+  paymentAmountPaise?: number;
+  razorpayPaymentId?: string;
+  skipReceipt?: boolean;
+  paymentMetadata?: Record<string, unknown>;
 }) {
-  const date = formatAwardDate();
-  const issuedAt = formatAwardDateTime();
-  const completionUrl = buildNominationCompletionUrl(params.completionToken);
-  const ceo = getCeoNominationEmail(
-    params.nomineeName,
-    params.nominatorName,
-    date,
-    issuedAt,
-    completionUrl,
-  );
+  void (async () => {
+    const messages: Array<{ to: string; subject: string; html: string; label: string }> = [];
 
-  sendEmailAsync(params.nomineeEmail, ceo.subject, ceo.html);
+    if (params.isSelf) {
+      const ceo = getCeoNominationEmail(params.nomineeName, params.nominatorName);
+      messages.push({
+        to: params.nomineeEmail,
+        subject: ceo.subject,
+        html: ceo.html,
+        label: "ceo_letter",
+      });
+      const app = getApplicationReceivedEmail(params.nomineeName);
+      messages.push({
+        to: params.nomineeEmail,
+        subject: app.subject,
+        html: app.html,
+        label: "application_ack",
+      });
+    } else {
+      if (!params.skipReceipt && params.paymentAmountPaise != null && params.razorpayPaymentId) {
+        const receipt = getPaymentReceiptEmail(
+          params.nominatorName,
+          params.paymentAmountPaise / 100,
+          params.razorpayPaymentId,
+        );
+        messages.push({
+          to: params.nominatorEmail,
+          subject: receipt.subject,
+          html: receipt.html,
+          label: "payment_receipt",
+        });
+      }
+      const ack = getNominantAcknowledgementEmail(params.nominatorName, params.nomineeName);
+      messages.push({
+        to: params.nominatorEmail,
+        subject: ack.subject,
+        html: ack.html,
+        label: "nominator_ack",
+      });
+      const ceo = getCeoNominationEmail(params.nomineeName, params.nominatorName);
+      messages.push({
+        to: params.nomineeEmail,
+        subject: ceo.subject,
+        html: ceo.html,
+        label: "ceo_letter",
+      });
+      const nomineeAck = getNomineeNominationAcknowledgementEmail(
+        params.nomineeName,
+        params.nominatorName,
+        params.category,
+      );
+      messages.push({
+        to: params.nomineeEmail,
+        subject: nomineeAck.subject,
+        html: nomineeAck.html,
+        label: "nominee_ack",
+      });
+    }
 
-  if (params.includeNominatorAck !== false) {
-    const ack = getNominantAcknowledgementEmail(
-      params.nominatorName,
-      params.nomineeName,
-      issuedAt,
-    );
-    sendEmailAsync(params.nominatorEmail, ack.subject, ack.html);
-  }
-}
+    let receiptDelivered = params.skipReceipt === true || params.isSelf;
 
-async function ensureCompletionToken(
-  db: NonNullable<ReturnType<typeof getDb>>,
-  row: { id: string; completionToken: string | null },
-): Promise<string> {
-  if (row.completionToken) {
-    return row.completionToken;
-  }
-  const completionToken = randomUUID();
-  await db
-    .update(nominations)
-    .set({ completionToken })
-    .where(eq(nominations.id, row.id));
-  return completionToken;
+    for (const message of messages) {
+      try {
+        const sent = await sendEmail(message.to, message.subject, message.html);
+        if (sent) {
+          nominationEmailLogger.info(
+            { to: message.to, label: message.label },
+            "Nomination email sent",
+          );
+          if (message.label === "payment_receipt") {
+            receiptDelivered = true;
+          }
+        } else {
+          nominationEmailLogger.warn(
+            { to: message.to, label: message.label },
+            "Nomination email skipped or failed",
+          );
+        }
+      } catch (err) {
+        nominationEmailLogger.error(
+          { err, to: message.to, label: message.label },
+          "Nomination email send error",
+        );
+      }
+    }
+
+    if (receiptDelivered && params.paymentId) {
+      const db = getDb();
+      if (db) {
+        const metadata = params.paymentMetadata ?? {};
+        await db
+          .update(payments)
+          .set({
+            metadata: {
+              ...metadata,
+              receiptEmailSent: true,
+            },
+          })
+          .where(eq(payments.id, params.paymentId));
+      }
+    }
+  })();
 }
 
 export async function postContact(req: Request, res: Response) {
@@ -429,468 +434,6 @@ export async function postContact(req: Request, res: Response) {
   res.status(201).json({ ok: true });
 }
 
-/** @deprecated Prefer POST /api/nominations/refer */
-export async function postNomination(req: Request, res: Response) {
-  return postNominationRefer(req, res);
-}
-
-export async function postNominationRefer(req: Request, res: Response) {
-  try {
-    const db = getDb();
-    if (!db) {
-      res.status(503).json({ error: "Database unavailable" });
-      return;
-    }
-
-    const parsed = referralNominationSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-      return;
-    }
-
-    const data = parsed.data;
-    const nomineeEmail = normalizeEmail(data.nomineeEmail);
-    const nominatorEmail = normalizeEmail(data.nominatorEmail);
-
-    if (isSelfNomination(data, nominatorEmail, nomineeEmail)) {
-      res.status(400).json({
-        error: "Self-nominations must use the full application flow with payment.",
-        code: "SELF_NOMINATION_REQUIRED",
-      });
-      return;
-    }
-
-    const existing = await findNominationByNomineeEmail(db, nomineeEmail);
-    if (existing) {
-      if (isCompletedNominationStatus(existing.status) || existing.paymentStatus === "paid") {
-        res.status(409).json({
-          error: "An application for this email has already been completed and is under review.",
-          code: "ALREADY_COMPLETED",
-        });
-        return;
-      }
-
-      if (existing.status === "referral_pending") {
-        const completionToken = await ensureCompletionToken(db, existing);
-        const inviteSentAt = new Date();
-        await db
-          .update(nominations)
-          .set({ completionToken, inviteSentAt })
-          .where(eq(nominations.id, existing.id));
-
-        sendReferralEmails({
-          nomineeEmail: existing.nomineeEmail,
-          nomineeName: existing.nomineeName,
-          nominatorEmail,
-          nominatorName: data.nominatorName,
-          completionToken,
-          includeNominatorAck: false,
-        });
-
-        res.status(200).json({
-          ok: true,
-          alreadyNominated: true,
-          message:
-            "This candidate has already been nominated. A fresh completion link has been sent to their email.",
-          id: existing.id,
-          referenceId: existing.referenceId,
-        });
-        return;
-      }
-
-      res.status(409).json({
-        error: "A nomination for this email already exists.",
-        code: "DUPLICATE_NOMINEE",
-      });
-      return;
-    }
-
-    const id = randomUUID();
-    const referenceId = makeReference("NOM");
-    const completionToken = randomUUID();
-    const inviteSentAt = new Date();
-
-    const formData = {
-      ...data,
-      nomineeEmail,
-      nominatorEmail,
-      submissionType: "referral",
-    };
-
-    await db.insert(nominations).values({
-      id,
-      referenceId,
-      status: "referral_pending",
-      reviewStatus: "pending",
-      paymentStatus: "unpaid",
-      completionToken,
-      nomineeEmail,
-      inviteSentAt,
-      nominatorName: data.nominatorName,
-      nominatorEmail,
-      nominatorPhone: data.nominatorPhone,
-      nomineeName: data.nomineeName,
-      category: data.category,
-      profilePhotoKey: null,
-      supportingDocsKey: null,
-      videoKey: null,
-      formData,
-    });
-
-    sendReferralEmails({
-      nomineeEmail,
-      nomineeName: data.nomineeName,
-      nominatorEmail,
-      nominatorName: data.nominatorName,
-      completionToken,
-    });
-
-    res.status(201).json({ ok: true, id, referenceId });
-  } catch (err) {
-    console.error("Nomination refer error:", err);
-    const message = err instanceof Error ? err.message : "Unable to submit nomination";
-    const isMissingColumn =
-      typeof err === "object" &&
-      err !== null &&
-      "code" in err &&
-      (err as { code?: string }).code === "ER_BAD_FIELD_ERROR";
-    res.status(isMissingColumn ? 503 : 500).json({
-      error: isMissingColumn
-        ? "Database schema is out of date. Run npm run db:push in the backend."
-        : message,
-    });
-  }
-}
-
-export async function getValidateNominationToken(req: Request, res: Response) {
-  const db = getDb();
-  if (!db) {
-    res.status(503).json({ error: "Database unavailable" });
-    return;
-  }
-
-  const rawToken = req.params.token;
-  const token = typeof rawToken === "string" ? rawToken : rawToken?.[0];
-  if (!token) {
-    res.status(400).json({ error: "Missing completion token" });
-    return;
-  }
-
-  const [row] = await db
-    .select()
-    .from(nominations)
-    .where(eq(nominations.completionToken, token))
-    .limit(1);
-
-  if (!row || row.status !== "referral_pending" || row.paymentStatus === "paid") {
-    res.status(400).json({ error: "Invalid or expired completion link" });
-    return;
-  }
-
-  const formData =
-    row.formData && typeof row.formData === "object" && !Array.isArray(row.formData)
-      ? (row.formData as Record<string, unknown>)
-      : {};
-
-  const str = (key: string) => (typeof formData[key] === "string" ? (formData[key] as string) : "");
-  const publications = Array.isArray(formData.publications)
-    ? formData.publications.filter((v): v is string => typeof v === "string")
-    : [];
-
-  res.json({
-    ok: true,
-    referenceId: row.referenceId,
-    nominatorName: row.nominatorName,
-    nominatorEmail: row.nominatorEmail,
-    nominatorOrg: str("nominatorOrg"),
-    relationship: str("relationship"),
-    nomineeName: row.nomineeName,
-    nomineeType: str("nomineeType"),
-    nomineeDesignation: str("nomineeDesignation"),
-    nomineeEmail: row.nomineeEmail || str("nomineeEmail"),
-    nomineePhone: getNomineePhone(row.formData) || str("nomineePhone"),
-    nomineeLocation: str("nomineeLocation"),
-    nomineeSocial: str("nomineeSocial"),
-    category: row.category,
-    publications,
-  });
-}
-
-export async function postNominationResendLink(req: Request, res: Response) {
-  const db = getDb();
-  if (!db) {
-    res.status(503).json({ error: "Database unavailable" });
-    return;
-  }
-
-  const parsed = resendCompletionLinkSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-    return;
-  }
-
-  const email = normalizeEmail(parsed.data.email);
-  const existing = await findNominationByNomineeEmail(db, email);
-
-  if (!existing) {
-    res.status(200).json({
-      ok: true,
-      message: "If a pending nomination exists for this email, a completion link has been sent.",
-    });
-    return;
-  }
-
-  if (isCompletedNominationStatus(existing.status) || existing.paymentStatus === "paid") {
-    res.status(409).json({
-      error: "An application for this email has already been completed and is under review.",
-      code: "ALREADY_COMPLETED",
-    });
-    return;
-  }
-
-  if (existing.status !== "referral_pending") {
-    res.status(200).json({
-      ok: true,
-      message: "If a pending nomination exists for this email, a completion link has been sent.",
-    });
-    return;
-  }
-
-  const completionToken = await ensureCompletionToken(db, existing);
-  const inviteSentAt = new Date();
-  await db
-    .update(nominations)
-    .set({ completionToken, inviteSentAt })
-    .where(eq(nominations.id, existing.id));
-
-  sendReferralEmails({
-    nomineeEmail: existing.nomineeEmail,
-    nomineeName: existing.nomineeName,
-    nominatorEmail: existing.nominatorEmail,
-    nominatorName: existing.nominatorName,
-    completionToken,
-    includeNominatorAck: false,
-  });
-
-  res.status(200).json({
-    ok: true,
-    message: "If a pending nomination exists for this email, a completion link has been sent.",
-  });
-}
-
-export async function postNominationLookupByEmail(req: Request, res: Response) {
-  const db = getDb();
-  if (!db) {
-    res.status(503).json({ error: "Database unavailable" });
-    return;
-  }
-
-  const parsed = resendCompletionLinkSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-    return;
-  }
-
-  const email = normalizeEmail(parsed.data.email);
-  const existing = await findNominationByNomineeEmail(db, email);
-
-  if (!existing || existing.status !== "referral_pending") {
-    if (existing && (isCompletedNominationStatus(existing.status) || existing.paymentStatus === "paid")) {
-      res.status(409).json({
-        ok: false,
-        found: true,
-        error: "An application for this email has already been completed and is under review.",
-        code: "ALREADY_COMPLETED",
-      });
-      return;
-    }
-
-    if (existing) {
-      res.status(409).json({
-        ok: false,
-        found: true,
-        error:
-          "A nomination for this email exists but cannot be continued on site in its current state. Use Email me the link, or contact support with your reference ID.",
-        code: "NOT_CONTINUABLE",
-        status: existing.status,
-      });
-      return;
-    }
-
-    res.status(404).json({
-      ok: false,
-      found: false,
-      error:
-        "No incomplete nomination was found for this nominee email. Use the nominee's email (not the nominator's), or submit a new nomination first.",
-      code: "NOT_FOUND",
-    });
-    return;
-  }
-
-  if (existing.paymentStatus === "paid") {
-    res.status(409).json({
-      ok: false,
-      found: true,
-      error: "An application for this email has already been completed and is under review.",
-      code: "ALREADY_COMPLETED",
-    });
-    return;
-  }
-
-  const completionToken = await ensureCompletionToken(db, existing);
-  const inviteSentAt = new Date();
-  await db
-    .update(nominations)
-    .set({ completionToken, inviteSentAt })
-    .where(eq(nominations.id, existing.id));
-
-  // Continue-on-site: return the token so the client can open the completion page.
-  // Email delivery is handled separately by POST /nominations/resend-link.
-  res.status(200).json({
-    ok: true,
-    found: true,
-    nomineeName: existing.nomineeName,
-    category: existing.category,
-    completionToken,
-    completionUrl: buildNominationCompletionUrl(completionToken),
-  });
-}
-
-export async function postNominationComplete(req: Request, res: Response) {
-  const db = getDb();
-  if (!db) {
-    res.status(503).json({ error: "Database unavailable" });
-    return;
-  }
-
-  const parsed = completeNominationSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
-    return;
-  }
-
-  const data = parsed.data;
-  const [existing] = await db
-    .select()
-    .from(nominations)
-    .where(eq(nominations.completionToken, data.token))
-    .limit(1);
-
-  if (!existing || existing.status !== "referral_pending") {
-    res.status(400).json({ error: "Invalid or expired completion link" });
-    return;
-  }
-
-  if (existing.paymentStatus === "paid" || existing.paymentId) {
-    res.status(400).json({ error: "This nomination has already been paid" });
-    return;
-  }
-
-  const paymentCheck = await assertNominationPaymentUsable(db, data.paymentId);
-  if (!paymentCheck.ok) {
-    res.status(400).json({ error: paymentCheck.error });
-    return;
-  }
-
-  const existingFormData =
-    existing.formData && typeof existing.formData === "object" && !Array.isArray(existing.formData)
-      ? (existing.formData as Record<string, unknown>)
-      : {};
-
-  const incoming = data.formData ?? {};
-  const correctedName =
-    typeof incoming.nomineeName === "string" && incoming.nomineeName.trim()
-      ? incoming.nomineeName.trim()
-      : existing.nomineeName;
-  const correctedCategory =
-    typeof incoming.category === "string" && incoming.category.trim()
-      ? incoming.category.trim()
-      : existing.category;
-
-  let correctedEmail = existing.nomineeEmail;
-  if (typeof incoming.nomineeEmail === "string" && incoming.nomineeEmail.trim()) {
-    const nextEmail = normalizeEmail(incoming.nomineeEmail);
-    if (nextEmail !== existing.nomineeEmail) {
-      const conflict = await findNominationByNomineeEmail(db, nextEmail);
-      if (conflict && conflict.id !== existing.id) {
-        res.status(409).json({
-          error: "Another nomination already uses that email address.",
-          code: "DUPLICATE_NOMINEE",
-        });
-        return;
-      }
-      correctedEmail = nextEmail;
-    }
-  }
-
-  const mergedFormData = {
-    ...existingFormData,
-    ...incoming,
-    nomineeName: correctedName,
-    nomineeEmail: correctedEmail,
-    category: correctedCategory,
-    altVideoLink: data.altVideoLink,
-    submissionType: "full_application",
-    completedViaToken: true,
-  };
-
-  const referenceId = existing.referenceId ?? makeReference("APP");
-
-  await db
-    .update(nominations)
-    .set({
-      status: "under_review",
-      reviewStatus: "pending",
-      paymentId: data.paymentId,
-      paymentStatus: "paid",
-      completionToken: null,
-      nomineeName: correctedName,
-      nomineeEmail: correctedEmail,
-      category: correctedCategory,
-      profilePhotoKey: data.profilePhotoKey,
-      supportingDocsKey: data.supportingDocsKey ?? null,
-      videoKey: data.videoKey ?? null,
-      formData: mergedFormData,
-      referenceId,
-    })
-    .where(eq(nominations.id, existing.id));
-
-  await linkNominationPayment(
-    db,
-    data.paymentId,
-    existing.id,
-    referenceId,
-    (paymentCheck.payment.metadata ?? {}) as Record<string, unknown>,
-  );
-
-  const applicationEmail = getApplicationReceivedEmail(correctedName);
-  sendEmailAsync(correctedEmail, applicationEmail.subject, applicationEmail.html);
-
-  if (existing.nominatorEmail) {
-    const nominatorNotice = getNominatorNomineeCompletedEmail(
-      existing.nominatorName,
-      correctedName,
-      referenceId,
-      formatAwardDateTime(),
-    );
-    sendEmailAsync(existing.nominatorEmail, nominatorNotice.subject, nominatorNotice.html);
-  }
-
-  const razorpayPaymentId =
-    paymentCheck.payment.razorpayPaymentId ??
-    ((paymentCheck.payment.metadata ?? {}) as Record<string, unknown>).razorpayPaymentId;
-
-  await sendPaymentReceiptOnce(
-    db,
-    paymentCheck.payment,
-    correctedName,
-    correctedEmail,
-    typeof razorpayPaymentId === "string" ? razorpayPaymentId : existing.id,
-  );
-
-  res.status(200).json({ ok: true, id: existing.id, referenceId });
-}
-
 export async function postApplication(req: Request, res: Response) {
   const db = getDb();
   if (!db) {
@@ -915,18 +458,48 @@ export async function postApplication(req: Request, res: Response) {
   const nominatorEmail = normalizeEmail(data.nominatorEmail);
   const selfNomination = isSelfNomination(data.formData, nominatorEmail, nomineeEmail);
 
-  if (!selfNomination) {
-    res.status(400).json({
-      error:
-        "Third-party nominations must use the referral flow. The nominee completes payment via their email link.",
-      code: "REFERRAL_REQUIRED",
-    });
-    return;
-  }
+  async function dispatchApplicationEmails(
+    payment:
+      | {
+          id: string;
+          amountPaise: number;
+          razorpayPaymentId: string | null;
+          metadata: unknown;
+        }
+      | null,
+  ) {
+    if (!payment) {
+      queueApplicationEmails({
+        isSelf: selfNomination,
+        nomineeName: data.nomineeName,
+        nomineeEmail,
+        nominatorName: data.nominatorName,
+        nominatorEmail,
+        category: data.category,
+        skipReceipt: true,
+      });
+      return;
+    }
 
-  function sendSelfApplicationEmails() {
-    const applicationEmail = getApplicationReceivedEmail(data.nomineeName);
-    sendEmailAsync(nomineeEmail, applicationEmail.subject, applicationEmail.html);
+    const metadata = (payment.metadata ?? {}) as Record<string, unknown>;
+    const skipReceipt = metadata.receiptEmailSent === true;
+    const razorpayPaymentId =
+      payment.razorpayPaymentId ??
+      (typeof metadata.razorpayPaymentId === "string" ? metadata.razorpayPaymentId : undefined);
+
+    queueApplicationEmails({
+      isSelf: selfNomination,
+      nomineeName: data.nomineeName,
+      nomineeEmail,
+      nominatorName: data.nominatorName,
+      nominatorEmail,
+      category: data.category,
+      paymentId: payment.id,
+      paymentAmountPaise: payment.amountPaise,
+      razorpayPaymentId: typeof razorpayPaymentId === "string" ? razorpayPaymentId : undefined,
+      skipReceipt,
+      paymentMetadata: metadata,
+    });
   }
 
   async function finalizePaidApplication(params: {
@@ -936,7 +509,23 @@ export async function postApplication(req: Request, res: Response) {
     existingPaymentId?: string | null;
   }) {
     let paymentId = params.existingPaymentId ?? null;
-    if (!paymentId) {
+    let paymentRow:
+      | {
+          id: string;
+          amountPaise: number;
+          razorpayPaymentId: string | null;
+          metadata: unknown;
+        }
+      | null = null;
+
+    if (paymentId) {
+      const [existingPayment] = await db!
+        .select()
+        .from(payments)
+        .where(eq(payments.id, paymentId))
+        .limit(1);
+      paymentRow = existingPayment ?? null;
+    } else {
       if (!data.paymentId) {
         res.status(400).json({ error: "Nomination fee payment is required" });
         return null;
@@ -949,6 +538,7 @@ export async function postApplication(req: Request, res: Response) {
       }
 
       paymentId = data.paymentId;
+      paymentRow = paymentCheck.payment;
       await linkNominationPayment(
         db!,
         paymentId,
@@ -966,7 +556,6 @@ export async function postApplication(req: Request, res: Response) {
         reviewStatus: "pending",
         paymentId,
         paymentStatus: "paid",
-        completionToken: null,
         nomineeEmail,
         nominatorName: data.nominatorName,
         nominatorEmail,
@@ -987,7 +576,7 @@ export async function postApplication(req: Request, res: Response) {
       })
       .where(eq(nominations.id, params.nominationId));
 
-    sendSelfApplicationEmails();
+    await dispatchApplicationEmails(paymentRow);
     return { id: params.nominationId, referenceId };
   }
 
@@ -1033,7 +622,10 @@ export async function postApplication(req: Request, res: Response) {
       return;
     }
 
-    if (existingByEmail.status === "referral_pending") {
+    if (
+      existingByEmail.status === "draft" ||
+      existingByEmail.status === "pending_payment"
+    ) {
       const existingFormData =
         existingByEmail.formData &&
         typeof existingByEmail.formData === "object" &&
@@ -1081,9 +673,7 @@ export async function postApplication(req: Request, res: Response) {
     reviewStatus: "pending",
     paymentId: data.paymentId,
     paymentStatus: "paid",
-    completionToken: null,
     nomineeEmail,
-    inviteSentAt: null,
     nominatorName: data.nominatorName,
     nominatorEmail,
     nominatorPhone: data.nominatorPhone,
@@ -1108,9 +698,57 @@ export async function postApplication(req: Request, res: Response) {
     (paymentCheck.payment.metadata ?? {}) as Record<string, unknown>,
   );
 
-  sendSelfApplicationEmails();
+  await dispatchApplicationEmails(paymentCheck.payment);
 
   res.status(201).json({ ok: true, id: nominationId, referenceId });
+}
+
+const checkNomineeEmailSchema = z.object({
+  email: z.string().email().max(255),
+});
+
+export async function postCheckNomineeEmail(req: Request, res: Response) {
+  const db = getDb();
+  if (!db) {
+    res.status(503).json({ error: "Database unavailable" });
+    return;
+  }
+
+  const parsed = checkNomineeEmailSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid email", details: parsed.error.flatten() });
+    return;
+  }
+
+  const nomineeEmail = normalizeEmail(parsed.data.email);
+  const existing = await findNominationByNomineeEmail(db, nomineeEmail);
+
+  if (!existing) {
+    res.json({ ok: true, available: true });
+    return;
+  }
+
+  if (isCompletedNominationStatus(existing.status) || existing.paymentStatus === "paid") {
+    res.status(409).json({
+      ok: false,
+      available: false,
+      code: "ALREADY_COMPLETED",
+      error: "An application for this email has already been completed and is under review.",
+    });
+    return;
+  }
+
+  if (existing.status === "draft" || existing.status === "pending_payment") {
+    res.json({ ok: true, available: true, resumable: true });
+    return;
+  }
+
+  res.status(409).json({
+    ok: false,
+    available: false,
+    code: "DUPLICATE_NOMINEE",
+    error: "A nomination for this email already exists.",
+  });
 }
 
 export async function postNominationCreateOrder(req: Request, res: Response) {
@@ -1236,15 +874,6 @@ export async function postNominationPayment(req: Request, res: Response) {
       return;
     }
 
-    const metadata = (existingPayment.metadata ?? {}) as Record<string, unknown>;
-    await sendPaymentReceiptOnce(
-      db,
-      existingPayment,
-      typeof metadata.contactName === "string" ? metadata.contactName : (nominatorName ?? "Valued Customer"),
-      typeof metadata.contactEmail === "string" ? metadata.contactEmail : nominatorEmail,
-      razorpayPaymentId,
-    );
-
     res.json({ ok: true, paymentId: existingPayment.id });
     return;
   }
@@ -1276,14 +905,6 @@ export async function postNominationPayment(req: Request, res: Response) {
     status: "paid",
     metadata: paymentMetadata,
   });
-
-  await sendPaymentReceiptOnce(
-    db,
-    { id: paymentId, amountPaise, metadata: paymentMetadata },
-    nominatorName ?? "Valued Customer",
-    nominatorEmail,
-    razorpayPaymentId,
-  );
 
   res.json({ ok: true, paymentId });
 }
@@ -1623,6 +1244,11 @@ export async function postPaymentsWebhook(req: Request, res: Response) {
       }
     }
 
+    if (existingPayment.type === "nomination") {
+      res.status(200).json({ ok: true });
+      return;
+    }
+
     await sendPaymentReceiptOnce(
       db,
       existingPayment,
@@ -1695,6 +1321,11 @@ export async function postPaymentsWebhook(req: Request, res: Response) {
     }
   }
 
+  if (paymentType === "nomination") {
+    res.status(200).json({ ok: true });
+    return;
+  }
+
   await sendPaymentReceiptOnce(
     db,
     { id: paymentId, amountPaise, metadata: paymentMetadata },
@@ -1705,6 +1336,3 @@ export async function postPaymentsWebhook(req: Request, res: Response) {
 
   res.status(200).json({ ok: true });
 }
-
-// Re-export for tests or guards
-export { hasNominationAttachments };

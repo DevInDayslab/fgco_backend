@@ -11,12 +11,10 @@ import {
 import { sendEmail } from "../utils/mailer.js";
 import { getNomineeEmail, getNomineePhone } from "../utils/nomination-email.js";
 import {
-  buildNominationCompletionUrl,
   formatAwardDate,
   formatAwardDateTime,
   getCeoNominationEmail,
 } from "../utils/templates.js";
-import { randomUUID } from "node:crypto";
 
 type PaidNominationLookup = {
   nominationIds: Set<string>;
@@ -109,8 +107,6 @@ export async function getNominations(_req: Request, res: Response) {
         reviewStatus: nominations.reviewStatus,
         paymentId: nominations.paymentId,
         nominationPaymentStatus: nominations.paymentStatus,
-        inviteSentAt: nominations.inviteSentAt,
-        completionToken: nominations.completionToken,
         linkedPaymentStatus: payments.status,
         formData: nominations.formData,
         createdAt: nominations.createdAt,
@@ -139,8 +135,6 @@ export async function getNominations(_req: Request, res: Response) {
       reviewStatus: row.reviewStatus,
       paymentId: row.paymentId,
       paymentStatus: row.nominationPaymentStatus,
-      inviteSentAt: row.inviteSentAt,
-      completionTokenActive: Boolean(row.completionToken),
       createdAt: row.createdAt,
       nomineeEmail: row.nomineeEmail || getNomineeEmail(row.formData),
       nomineePhone: getNomineePhone(row.formData),
@@ -199,7 +193,6 @@ export async function getNominationById(req: Request, res: Response) {
   res.json({
     ...row.nomination,
     nomineeEmail: row.nomination.nomineeEmail || getNomineeEmail(row.nomination.formData),
-    completionTokenActive: Boolean(row.nomination.completionToken),
     paymentPaid: resolveNominationPaymentPaid(
       {
         id: row.nomination.id,
@@ -217,7 +210,7 @@ export async function getNominationById(req: Request, res: Response) {
 const patchNominationSchema = z.object({
   reviewStatus: z.enum(["pending", "approved"]).optional(),
   status: z
-    .enum(["draft", "pending_payment", "paid", "under_review", "referral_pending"])
+    .enum(["draft", "pending_payment", "paid", "under_review"])
     .optional(),
   paymentStatus: z.enum(["unpaid", "paid"]).optional(),
   nominatorName: z.string().min(1).max(255).optional(),
@@ -606,25 +599,11 @@ export async function postSendInvite(req: Request, res: Response) {
     return;
   }
 
-  let completionToken = row.completionToken;
-  if (!completionToken && row.status === "referral_pending") {
-    completionToken = randomUUID();
-    await db
-      .update(nominations)
-      .set({ completionToken })
-      .where(eq(nominations.id, parsed.data.nominationId));
-  }
-
-  const completionUrl = completionToken
-    ? buildNominationCompletionUrl(completionToken)
-    : undefined;
-
   const invite = getCeoNominationEmail(
     row.nomineeName,
     row.nominatorName,
     formatAwardDate(),
     formatAwardDateTime(),
-    completionUrl,
   );
 
   const sent = await sendEmail(nomineeEmail, invite.subject, invite.html);
@@ -639,7 +618,6 @@ export async function postSendInvite(req: Request, res: Response) {
       .update(nominations)
       .set({
         reviewStatus: "approved",
-        inviteSentAt: new Date(),
         formData: {
           ...existingFormData,
           formalInviteSentAt: new Date().toISOString(),
@@ -649,58 +627,4 @@ export async function postSendInvite(req: Request, res: Response) {
   }
 
   res.json({ ok: true, sent });
-}
-
-export async function postResendCompletionInvite(req: Request, res: Response) {
-  const db = getDb();
-  if (!db) {
-    res.status(503).json({ error: "Database unavailable" });
-    return;
-  }
-
-  const rawId = req.params.id;
-  const id = typeof rawId === "string" ? rawId : rawId?.[0];
-  if (!id) {
-    res.status(400).json({ error: "Missing nomination id" });
-    return;
-  }
-
-  const [row] = await db.select().from(nominations).where(eq(nominations.id, id)).limit(1);
-  if (!row) {
-    res.status(404).json({ error: "Nomination not found" });
-    return;
-  }
-
-  if (row.status !== "referral_pending") {
-    res.status(400).json({ error: "Completion invites can only be resent for referral-pending nominations" });
-    return;
-  }
-
-  const nomineeEmail = row.nomineeEmail || getNomineeEmail(row.formData);
-  if (!nomineeEmail) {
-    res.status(400).json({ error: "Nominee email not found on this nomination" });
-    return;
-  }
-
-  let completionToken = row.completionToken;
-  if (!completionToken) {
-    completionToken = randomUUID();
-  }
-
-  const inviteSentAt = new Date();
-  await db
-    .update(nominations)
-    .set({ completionToken, inviteSentAt })
-    .where(eq(nominations.id, id));
-
-  const invite = getCeoNominationEmail(
-    row.nomineeName,
-    row.nominatorName,
-    formatAwardDate(),
-    formatAwardDateTime(),
-    buildNominationCompletionUrl(completionToken),
-  );
-
-  const sent = await sendEmail(nomineeEmail, invite.subject, invite.html);
-  res.json({ ok: true, sent, inviteSentAt });
 }

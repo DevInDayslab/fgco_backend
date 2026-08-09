@@ -41,21 +41,13 @@ export const nominations = mysqlTable(
   {
     id: varchar("id", { length: 36 }).primaryKey(),
     referenceId: varchar("reference_id", { length: 64 }),
-    status: mysqlEnum("status", [
-      "draft",
-      "pending_payment",
-      "paid",
-      "under_review",
-      "referral_pending",
-    ])
+    status: mysqlEnum("status", ["draft", "pending_payment", "paid", "under_review"])
       .notNull()
       .default("draft"),
     reviewStatus: mysqlEnum("review_status", ["pending", "approved"]).notNull().default("pending"),
     paymentId: varchar("payment_id", { length: 36 }),
     paymentStatus: mysqlEnum("payment_status", ["unpaid", "paid"]).notNull().default("unpaid"),
-    completionToken: varchar("completion_token", { length: 64 }),
     nomineeEmail: varchar("nominee_email", { length: 255 }).notNull().default(""),
-    inviteSentAt: timestamp("invite_sent_at"),
     nominatorName: varchar("nominator_name", { length: 255 }).notNull(),
     nominatorEmail: varchar("nominator_email", { length: 255 }).notNull(),
     nominatorPhone: varchar("nominator_phone", { length: 32 }).notNull(),
@@ -68,10 +60,7 @@ export const nominations = mysqlTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().onUpdateNow().notNull(),
   },
-  (table) => [
-    uniqueIndex("nominations_completion_token_uidx").on(table.completionToken),
-    uniqueIndex("nominations_nominee_email_uidx").on(table.nomineeEmail),
-  ],
+  (table) => [uniqueIndex("nominations_nominee_email_uidx").on(table.nomineeEmail)],
 );
 
 export const sponsorshipReservations = mysqlTable("sponsorship_reservations", {

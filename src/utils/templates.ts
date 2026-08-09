@@ -291,10 +291,7 @@ export function getCeoNominationEmail(
         We invite you to complete your nomination profile by submitting your latest professional photograph, detailed profile, key achievements and supporting documents through our secure completion portal. These materials will enable the Jury to conduct a comprehensive and fair evaluation.
       </p>
       ${completionCtaBlock(completionUrl)}`
-    : `
-      <p style="margin:20px 0;font-size:15px;line-height:1.8;color:${TEXT};">
-        We invite you to complete your nomination profile by submitting your latest professional photograph, detailed profile, key achievements and supporting documents through our official process. These materials will enable the Jury to conduct a comprehensive and fair evaluation.
-      </p>`;
+    : "";
 
   const body = `
     <div style="padding:20px 24px 0;text-align:center;background:#050508;border-bottom:1px solid #3a2c08;">
@@ -384,7 +381,7 @@ export function getNominantAcknowledgementEmail(
         { label: "Programme Year", value: year },
       ])}
       <p style="margin:20px 0;font-size:15px;line-height:1.8;color:${TEXT};">
-        The nominee has been notified of this honour and invited to complete their official profile. Our team will keep you informed of significant milestones in the evaluation process.
+        The nominee has been notified of this honour. Your nomination and supporting materials are now with the Awards Committee for evaluation. Our team will keep you informed of significant milestones in the process.
       </p>
       <p style="margin:24px 0 8px;font-size:14px;font-style:italic;color:#a09070;">Together, let us celebrate excellence, inspire leadership and build a stronger future for our nation.</p>
       ${goldDivider()}
@@ -437,6 +434,56 @@ export function getApplicationReceivedEmail(applicantName: string): EmailTemplat
   return {
     subject: `Application Acknowledgement - HIT ViERA National Awards ${year}`,
     html: wrapEmailTemplate("Application Acknowledgement", body),
+  };
+}
+
+export function getNomineeNominationAcknowledgementEmail(
+  nomineeName: string,
+  nominatorName: string,
+  category: string,
+  date: string = formatAwardDateTime(),
+): EmailTemplate {
+  const year = getAwardsProgrammeYear();
+  const body = `
+    ${heroBlock("Honouring Innovation · Excellence · Remarkable Achievement")}
+    <div style="padding:14px 24px;text-align:center;background:linear-gradient(135deg,#120e04,#1e1608);border-top:1px solid #3a2c08;border-bottom:1px solid #3a2c08;">
+      <span style="font-size:10px;letter-spacing:4px;color:${GOLD};text-transform:uppercase;">&#10022; Nomination Acknowledgement &#10022;</span>
+    </div>
+    <div style="padding:36px 32px;background:linear-gradient(180deg,${BG_PANEL},#0f0f1c);">
+      <p style="margin:0 0 8px;font-size:11px;text-align:right;color:#8a8070;">Received: ${escapeHtml(date)}</p>
+      <p style="margin:0 0 24px;font-size:24px;color:${TEXT_LIGHT};font-weight:bold;">Dear ${escapeHtml(nomineeName)},</p>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:${TEXT};">
+        We are pleased to inform you that <strong style="color:${GOLD};">${escapeHtml(nominatorName)}</strong> has submitted a nomination recommending you for the <strong style="color:${GOLD};">HIT ViERA National Awards ${year}</strong> under the category of <strong style="color:${GOLD};">${escapeHtml(category)}</strong>.
+      </p>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:${TEXT};">
+        Being nominated is a meaningful recognition of the confidence, respect and admiration that others hold for your professional accomplishments and your positive contribution to your field and the nation.
+      </p>
+      ${quoteBox(
+        "Excellence recognised by others is among the highest honours a professional can receive. Your nomination reflects not only what you have achieved, but the impact you continue to create.",
+        "HIT ViERA Awards Committee",
+      )}
+      ${dataGrid([
+        { label: "Nominated By", value: nominatorName },
+        { label: "Category", value: category },
+        { label: "Date Received", value: date },
+        { label: "Programme Year", value: year },
+      ])}
+      <div style="margin:24px 0;padding:16px 20px;background:linear-gradient(135deg,#0a1a0a,#0d1f0d);border:1px solid #1a3a1a;border-left:4px solid #2a7a2a;">
+        <p style="margin:0;font-size:11px;letter-spacing:2px;color:#4CAF50;text-transform:uppercase;">&#9679; Nomination Successfully Received &amp; Under Review</p>
+      </div>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:${TEXT};">
+        Your nomination will now undergo a comprehensive evaluation by the <strong style="color:${GOLD};">HIT ViERA Awards Committee</strong> in accordance with our transparent and merit-based assessment process. Should any additional information be required, our team will contact you through your registered email or mobile number.
+      </p>
+      <p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:${TEXT};">
+        We thank you for your distinguished contributions and wish you every success as your nomination proceeds through the evaluation process.
+      </p>
+      <p style="margin:24px 0 8px;font-size:14px;font-style:italic;color:#a09070;">Warm Regards,</p>
+      ${roopaSignature()}
+    </div>`;
+
+  return {
+    subject: `Nomination Acknowledgement - HIT ViERA National Awards ${year}`,
+    html: wrapEmailTemplate("Nomination Acknowledgement", body),
   };
 }
 
