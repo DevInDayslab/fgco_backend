@@ -4,7 +4,7 @@ export type DbCredentials = {
   password: string | undefined;
   database: string;
   port: number;
-  source: "local" | "cpanel";
+  source: "local" | "godaddy";
 };
 
 export function shouldUseLocalDb(): boolean {
@@ -33,9 +33,9 @@ export function getDbCredentials(): DbCredentials | null {
     };
   }
 
-  const host = process.env.CPANEL_DB_HOST?.trim();
-  const user = process.env.CPANEL_DB_USER?.trim();
-  const database = process.env.CPANEL_DB_NAME?.trim();
+  const host = process.env.DB_HOST?.trim();
+  const user = process.env.DB_USER?.trim();
+  const database = process.env.DB_NAME?.trim();
 
   if (!host || !user || !database) {
     return null;
@@ -44,10 +44,10 @@ export function getDbCredentials(): DbCredentials | null {
   return {
     host,
     user,
-    password: process.env.CPANEL_DB_PASS,
+    password: process.env.DB_PASSWORD,
     database,
-    port: Number(process.env.CPANEL_DB_PORT) || 3306,
-    source: "cpanel",
+    port: Number(process.env.DB_PORT) || 3306,
+    source: "godaddy",
   };
 }
 
@@ -55,5 +55,5 @@ export function getMissingDbEnvMessage(): string {
   if (shouldUseLocalDb()) {
     return "LOCAL_DB_HOST / LOCAL_DB_USER / LOCAL_DB_NAME not set";
   }
-  return "CPANEL_DB_HOST / CPANEL_DB_USER / CPANEL_DB_NAME not set";
+  return "DB_HOST / DB_USER / DB_NAME not set";
 }

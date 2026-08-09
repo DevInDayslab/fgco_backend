@@ -9,7 +9,7 @@ const credentials = getDbCredentials();
 
 if (!credentials) {
   throw new Error(
-    "Database credentials missing. Set LOCAL_DB_* for development or CPANEL_DB_* for production.",
+    "Database credentials missing. Set LOCAL_DB_* for development or DB_* (GoDaddy Hosted Database) for production.",
   );
 }
 

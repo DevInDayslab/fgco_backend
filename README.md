@@ -54,11 +54,11 @@ Set variables in GoDaddy’s environment panel (never commit `.env`).
 | `NODE_ENV` | `production` |
 | `PORT` | Host port (often injected by platform) |
 | `CORS_ORIGIN` | Comma-separated frontend origins |
-| `CPANEL_DB_HOST` | GoDaddy MySQL hostname |
-| `CPANEL_DB_PORT` | Usually `3306` |
-| `CPANEL_DB_NAME` | Database name |
-| `CPANEL_DB_USER` | Database user |
-| `CPANEL_DB_PASS` | Database password |
+| `DB_HOST` | GoDaddy Hosted Database hostname (injected automatically) |
+| `DB_PORT` | Usually `3306` (injected automatically) |
+| `DB_NAME` | Database name (injected automatically) |
+| `DB_USER` | Database user (injected automatically) |
+| `DB_PASSWORD` | Database password (injected automatically) |
 | `ADMIN_USERNAME` | Bootstrap admin username when `admins` is empty (default `admin`) |
 | `ADMIN_PASSWORD` | Bootstrap admin password when `admins` is empty |
 | `ADMIN_PASSCODE` | Optional bootstrap fallback if `ADMIN_PASSWORD` is unset |
@@ -66,7 +66,7 @@ Set variables in GoDaddy’s environment panel (never commit `.env`).
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outbound email |
 | `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Payments (when wired) |
 
-Do **not** set `LOCAL_DB_*` on production unless you intentionally want to override cPanel credentials.
+Do **not** set `LOCAL_DB_*` on production unless you intentionally want to override GoDaddy Hosted Database credentials.
 
 ### Frontend admin pairing
 
