@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
-import { getMailConfig } from "../config/mail.js";
+import { getMailConfig, getResendConfig } from "../config/mail.js";
 import {
   getMailDiagnostics,
   sendEmailDetailed,
@@ -83,13 +83,14 @@ export async function postMailTest(req: Request, res: Response) {
 
   const { to, template } = parsed.data;
   const cfg = getMailConfig();
-  if (!cfg) {
+  const resend = getResendConfig();
+  if (!cfg && !resend) {
     res.status(503).json({
       ok: false,
       sent: false,
       template,
       to,
-      error: "SMTP not configured — missing required env vars",
+      error: "No mail provider configured — set RESEND_API_KEY or SMTP_*",
       diagnostics: await getMailDiagnostics({ verify: false }),
     });
     return;

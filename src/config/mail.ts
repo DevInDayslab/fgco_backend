@@ -12,6 +12,13 @@ export type MailConfig = {
   fromName: string;
 };
 
+export type ResendConfig = {
+  apiKey: string;
+  from: string;
+  fromEmail: string;
+  fromName: string;
+};
+
 export type MailTransportProfile = MailConfig & {
   /** Human-readable label for logs/diagnostics */
   label: string;
@@ -20,9 +27,32 @@ export type MailTransportProfile = MailConfig & {
   rejectUnauthorized: boolean;
 };
 
+export function getResendConfig(): ResendConfig | null {
+  const apiKey = process.env.RESEND_API_KEY?.trim();
+  const fromEmail = process.env.MAIL_FROM?.trim();
+  if (!apiKey || !fromEmail) return null;
+
+  const fromName = process.env.MAIL_FROM_NAME?.trim() || "FG Media Hub";
+  return {
+    apiKey,
+    fromEmail,
+    fromName,
+    from: `${fromName} <${fromEmail}>`,
+  };
+}
+
+export function getPreferredMailProvider(): "resend" | "smtp" {
+  if (getResendConfig()) return "resend";
+  return "smtp";
+}
+
 function isLocalSmtpHost(host: string): boolean {
   const normalized = host.trim().toLowerCase();
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+export function isLocalSmtpHostName(host: string): boolean {
+  return isLocalSmtpHost(host);
 }
 
 function deriveTlsServername(host: string): string {
@@ -108,15 +138,19 @@ export function getSmtpTransportProfiles(): MailTransportProfile[] {
     add(fallbackHost, fallbackPort, fallbackSecure, "fallback-env");
   }
 
-  // Auto-fallback for shared hosting: external mail hostname is often blocked outbound.
-  if (!isLocalSmtpHost(primaryHost)) {
+  // Optional localhost fallbacks — only for API running on the SAME server as cPanel mail.
+  // GoDaddy Node.js PaaS is a separate container: localhost SMTP will NOT deliver mail.
+  const allowLocalhostFallback = process.env.SMTP_ALLOW_LOCALHOST_FALLBACK === "true";
+  if (!isLocalSmtpHost(primaryHost) && allowLocalhostFallback) {
     add("localhost", primaryPort, primarySecure, "localhost-primary-port");
     if (primaryPort !== 587) {
       add("localhost", 587, false, "localhost-587-starttls");
     }
-    if (primaryPort !== 25) {
-      add("localhost", 25, false, "localhost-25");
-    }
+  }
+
+  // Alternate remote port when primary is 465 (some networks block 465 but allow 587).
+  if (!isLocalSmtpHost(primaryHost) && primaryPort === 465) {
+    add(primaryHost, 587, false, "primary-587-starttls");
   }
 
   return profiles;
@@ -174,7 +208,17 @@ export function logMailConfigStatus(): void {
 export function getSmtpEaccesHint(host: string | null | undefined): string | null {
   if (!host || isLocalSmtpHost(host)) return null;
   return (
-    "GoDaddy/cPanel often blocks outbound SMTP to the public mail server IP (EACCES). " +
-    "Set SMTP_HOST=localhost and SMTP_TLS_SERVERNAME=mail.fgco.in on the host, or let the app auto-fallback to localhost."
+    "GoDaddy Node.js PaaS blocks outbound SMTP to mail.fgco.in (EACCES) and localhost is NOT your mail server. " +
+    "Use RESEND_API_KEY for production email, or run the API on cPanel Node (same server as mail)."
+  );
+}
+
+export function getMailHostingHint(): string {
+  if (getResendConfig()) {
+    return "Resend API is configured — production email will use Resend (recommended for GoDaddy PaaS).";
+  }
+  return (
+    "SMTP works from your laptop but GoDaddy Node.js PaaS cannot reach cPanel mail the same way. " +
+    "Add RESEND_API_KEY (verify fgco.in in Resend) or host the API on cPanel Node."
   );
 }

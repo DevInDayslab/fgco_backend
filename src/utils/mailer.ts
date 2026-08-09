@@ -6,11 +6,16 @@ import type { Transporter } from "nodemailer";
 import pino from "pino";
 import {
   getMailConfig,
+  getMailHostingHint,
+  getPreferredMailProvider,
+  getResendConfig,
   getSmtpEaccesHint,
   getSmtpTransportProfiles,
+  isLocalSmtpHostName,
   type MailTransportProfile,
 } from "../config/mail.js";
 import { RAMESH_EMAIL_IMAGE_CID } from "./templates.js";
+import { isResendConfigured, sendViaResend, verifyResendConnection } from "./resend-mailer.js";
 
 const logger = pino({ name: "fg-media-hub-mailer" });
 
@@ -190,6 +195,7 @@ function formatSendInfo(
 
 export type SendEmailResult = {
   sent: boolean;
+  provider?: "resend" | "smtp";
   messageId?: string;
   accepted?: string[];
   rejected?: string[];
@@ -204,8 +210,14 @@ export type SendEmailResult = {
   deliveryNote: string;
 };
 
-const DELIVERY_NOTE =
-  "SMTP accepted the message into the mail server queue. Inbox delivery can still fail due to spam filters, missing SPF/DKIM on fgco.in, or Gmail delays — check spam and cPanel Track Delivery.";
+const DELIVERY_NOTE_SMTP =
+  "SMTP accepted the message into the mail server queue. Inbox delivery can still fail due to spam filters or missing SPF/DKIM.";
+
+const DELIVERY_NOTE_RESEND =
+  "Message handed off to Resend for delivery. Check spam if not in inbox within a few minutes.";
+
+const DELIVERY_NOTE_PAAS =
+  "GoDaddy Node.js PaaS cannot use cPanel SMTP reliably. Configure RESEND_API_KEY for production.";
 
 async function sendWithProfile(
   profile: MailTransportProfile,
@@ -289,11 +301,25 @@ export async function verifySmtpConnection(): Promise<{
   port?: number;
   user?: string;
   label?: string;
+  provider?: "resend" | "smtp";
   attemptedProfiles?: string[];
   hint?: string | null;
   error?: string;
   smtp?: ReturnType<typeof smtpErrorMeta>;
 }> {
+  if (isResendConfigured()) {
+    const resend = await verifyResendConnection();
+    return {
+      ok: resend.ok,
+      durationMs: 0,
+      provider: "resend",
+      host: "resend-api",
+      user: resend.from,
+      label: "resend",
+      error: resend.error,
+    };
+  }
+
   const cfg = getMailConfig();
   if (!cfg) {
     return {
@@ -325,6 +351,7 @@ export async function verifySmtpConnection(): Promise<{
     return {
       ok: true,
       durationMs,
+      provider: "smtp",
       host: profile.host,
       port: profile.port,
       user: profile.user,
@@ -341,6 +368,7 @@ export async function verifySmtpConnection(): Promise<{
     return {
       ok: false,
       durationMs,
+      provider: "smtp",
       host: cfg.host,
       port: cfg.port,
       user: cfg.user,
@@ -359,7 +387,11 @@ export async function getMailDiagnostics(options?: { verify?: boolean }) {
   const profiles = getSmtpTransportProfiles();
 
   const base = {
-    configured: Boolean(cfg),
+    configured: Boolean(cfg) || isResendConfigured(),
+    provider: getPreferredMailProvider(),
+    resendConfigured: isResendConfigured(),
+    resendFrom: getResendConfig()?.from ?? null,
+    hostingHint: getMailHostingHint(),
     missing,
     host: cfg?.host ?? null,
     port: cfg?.port ?? null,
@@ -403,11 +435,42 @@ export async function sendEmailDetailed(
   subject: string,
   html: string,
 ): Promise<SendEmailResult> {
+  if (isResendConfigured()) {
+    try {
+      const text = htmlToPlainText(html);
+      mailConsole("RESEND send start", { to, subject });
+      const result = await sendViaResend({ to, subject, html, text });
+      mailConsole("RESEND send ok", { to, subject, messageId: result.messageId });
+      return {
+        sent: true,
+        provider: "resend",
+        messageId: result.messageId,
+        accepted: [to],
+        rejected: [],
+        smtpResponse: "resend:accepted",
+        deliveryNote: DELIVERY_NOTE_RESEND,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Resend send failed";
+      mailConsole("RESEND send failed", { to, subject, error: message });
+      return {
+        sent: false,
+        provider: "resend",
+        error: message,
+        deliveryNote: DELIVERY_NOTE_RESEND,
+      };
+    }
+  }
+
   const cfg = getMailConfig();
   if (!cfg) {
     logger.warn({ to, subject }, "SMTP not configured — email skipped");
-    mailConsole("SKIP — SMTP not configured", { to, subject });
-    return { sent: false, error: "SMTP not configured", deliveryNote: DELIVERY_NOTE };
+    mailConsole("SKIP — no mail provider", { to, subject });
+    return {
+      sent: false,
+      error: "No mail provider configured — set RESEND_API_KEY or SMTP_*",
+      deliveryNote: DELIVERY_NOTE_PAAS,
+    };
   }
 
   const fromAddress = `"${cfg.fromName}" <${cfg.from}>`;
@@ -459,9 +522,12 @@ export async function sendEmailDetailed(
 
       return {
         sent,
+        provider: "smtp",
         ...result,
         smtpResponse: result.response,
-        deliveryNote: DELIVERY_NOTE,
+        deliveryNote: activeProfile?.host && isLocalSmtpHostName(activeProfile.host)
+          ? DELIVERY_NOTE_PAAS
+          : DELIVERY_NOTE_SMTP,
         error: sent ? undefined : "SMTP server rejected recipient",
       };
     } catch (error) {
@@ -481,8 +547,9 @@ export async function sendEmailDetailed(
       activeProfile = null;
       return {
         sent: false,
+        provider: "smtp",
         error: meta.message ?? "SMTP send failed",
-        deliveryNote: DELIVERY_NOTE,
+        deliveryNote: DELIVERY_NOTE_PAAS,
       };
     }
   }
