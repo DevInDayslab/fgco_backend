@@ -65,8 +65,8 @@ function resolveCorsOrigin(
     return;
   }
 
-  // FG Media production frontends
-  if (/^https:\/\/(www\.)?fgco\.in$/.test(origin)) {
+  // FG Media production frontends (apex, www, subdomains)
+  if (/^https:\/\/([a-z0-9-]+\.)*fgco\.in$/i.test(origin)) {
     callback(null, true);
     return;
   }
@@ -112,18 +112,21 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-const corsOrigins = process.env.CORS_ORIGIN?.split(",").map((o) => o.trim()).filter(Boolean);
-
 app.use(
   pinoHttp({
     logger,
     autoLogging: process.env.NODE_ENV !== "test",
   }),
 );
-app.use(helmet());
+app.use(
+  helmet({
+    // API is called from fgco.in — default same-origin CORP blocks cross-subdomain fetches.
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  }),
+);
 app.use(
   cors({
-    origin: corsOrigins?.length ? resolveCorsOrigin : true,
+    origin: resolveCorsOrigin,
     credentials: true,
     allowedHeaders: ["Content-Type", "Authorization"],
   }),
