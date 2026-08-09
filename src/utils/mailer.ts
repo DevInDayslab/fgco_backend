@@ -155,16 +155,85 @@ async function verifyProfile(profile: MailTransportProfile): Promise<void> {
   }
 }
 
+function htmlToPlainText(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/\s+\n/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function formatSendInfo(
+  info: Awaited<ReturnType<Transporter["sendMail"]>>,
+  profile: MailTransportProfile,
+) {
+  return {
+    messageId: info.messageId,
+    accepted: info.accepted,
+    rejected: info.rejected,
+    response: info.response,
+    profile: {
+      label: profile.label,
+      host: profile.host,
+      port: profile.port,
+      tlsServername: profile.tlsServername,
+    },
+  };
+}
+
+export type SendEmailResult = {
+  sent: boolean;
+  messageId?: string;
+  accepted?: string[];
+  rejected?: string[];
+  smtpResponse?: string;
+  profile?: {
+    label: string;
+    host: string;
+    port: number;
+    tlsServername: string;
+  };
+  error?: string;
+  deliveryNote: string;
+};
+
+const DELIVERY_NOTE =
+  "SMTP accepted the message into the mail server queue. Inbox delivery can still fail due to spam filters, missing SPF/DKIM on fgco.in, or Gmail delays — check spam and cPanel Track Delivery.";
+
 async function sendWithProfile(
   profile: MailTransportProfile,
-  mail: { from: string; to: string; subject: string; html: string; attachments?: ReturnType<typeof buildInlineAttachments> },
+  mail: {
+    from: string;
+    to: string;
+    subject: string;
+    html: string;
+    attachments?: ReturnType<typeof buildInlineAttachments>;
+  },
 ) {
   const transport = getTransporterForProfile(profile);
+  const text = htmlToPlainText(mail.html);
+
   return transport.sendMail({
     from: mail.from,
     to: mail.to,
+    replyTo: profile.from,
     subject: mail.subject,
+    text,
     html: mail.html,
+    envelope: {
+      from: profile.from,
+      to: mail.to,
+    },
+    headers: {
+      "X-Mailer": "FG Media Hub",
+    },
     ...(mail.attachments ? { attachments: mail.attachments } : {}),
   });
 }
@@ -329,18 +398,22 @@ export async function getMailDiagnostics(options?: { verify?: boolean }) {
   return { ...base, verify };
 }
 
-export async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
+export async function sendEmailDetailed(
+  to: string,
+  subject: string,
+  html: string,
+): Promise<SendEmailResult> {
   const cfg = getMailConfig();
   if (!cfg) {
     logger.warn({ to, subject }, "SMTP not configured — email skipped");
     mailConsole("SKIP — SMTP not configured", { to, subject });
-    return false;
+    return { sent: false, error: "SMTP not configured", deliveryNote: DELIVERY_NOTE };
   }
 
   const fromAddress = `"${cfg.fromName}" <${cfg.from}>`;
   const attachments = buildInlineAttachments(html);
 
-  async function attempt(retrying: boolean, tryAllProfiles: boolean): Promise<boolean> {
+  async function attempt(retrying: boolean, tryAllProfiles: boolean): Promise<SendEmailResult> {
     try {
       if (tryAllProfiles) {
         activeProfile = null;
@@ -365,26 +438,32 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
         attachments,
       });
 
+      const result = formatSendInfo(info, profile);
+      const sent = (result.rejected?.length ?? 0) === 0 && (result.accepted?.length ?? 0) > 0;
+
       logger.info(
         {
           to,
           subject,
-          messageId: info.messageId,
+          ...result,
           attachedCeoPhoto: Boolean(attachments),
-          profile: profile.label,
-          host: profile.host,
         },
-        "Email sent",
+        sent ? "Email accepted by SMTP" : "Email rejected by SMTP",
       );
-      mailConsole("SEND ok", {
+      mailConsole(sent ? "SEND accepted" : "SEND rejected", {
         to,
         subject,
-        messageId: info.messageId,
+        ...result,
         attachedCeoPhoto: Boolean(attachments),
-        profile: profile.label,
-        host: profile.host,
       });
-      return true;
+
+      return {
+        sent,
+        ...result,
+        smtpResponse: result.response,
+        deliveryNote: DELIVERY_NOTE,
+        error: sent ? undefined : "SMTP server rejected recipient",
+      };
     } catch (error) {
       const meta = smtpErrorMeta(error);
       logger.warn({ err: meta, to, subject, retrying, tryAllProfiles }, "SMTP send failed");
@@ -400,75 +479,27 @@ export async function sendEmail(to: string, subject: string, html: string): Prom
       logger.error({ err: error, ...meta, to, subject }, "Error sending email");
       resetTransporter();
       activeProfile = null;
-      return false;
+      return {
+        sent: false,
+        error: meta.message ?? "SMTP send failed",
+        deliveryNote: DELIVERY_NOTE,
+      };
     }
   }
 
   return attempt(false, false);
 }
 
-export async function sendSimpleTestEmail(to: string): Promise<{
-  sent: boolean;
-  subject: string;
-  messageId?: string;
-  error?: string;
-  hint?: string | null;
-  profile?: string;
-  host?: string;
-  smtp?: ReturnType<typeof smtpErrorMeta>;
-}> {
+export async function sendEmail(to: string, subject: string, html: string): Promise<boolean> {
+  const result = await sendEmailDetailed(to, subject, html);
+  return result.sent;
+}
+
+export async function sendSimpleTestEmail(to: string): Promise<SendEmailResult & { subject: string }> {
   const subject = `FG Media Hub SMTP test — ${new Date().toISOString()}`;
-  const html = `<p>This is a test email from the FG Media Hub API.</p><p>Time: ${new Date().toISOString()}</p>`;
-  const cfg = getMailConfig();
-
-  if (!cfg) {
-    return {
-      sent: false,
-      subject,
-      error: `SMTP not configured — missing: ${getMissingMailEnvVars().join(", ")}`,
-    };
-  }
-
-  const fromAddress = `"${cfg.fromName}" <${cfg.from}>`;
-
-  try {
-    activeProfile = null;
-    resetTransporter();
-    const { profile } = await resolveWorkingProfile("send");
-    mailConsole("TEST SEND start", {
-      to,
-      label: profile.label,
-      host: profile.host,
-      port: profile.port,
-    });
-    const info = await sendWithProfile(profile, {
-      from: fromAddress,
-      to,
-      subject,
-      html,
-    });
-    mailConsole("TEST SEND ok", { to, messageId: info.messageId, profile: profile.label, host: profile.host });
-    return {
-      sent: true,
-      subject,
-      messageId: info.messageId,
-      profile: profile.label,
-      host: profile.host,
-    };
-  } catch (error) {
-    const smtp = smtpErrorMeta(error);
-    const hint = isBlockedOutboundSmtpError(error) ? getSmtpEaccesHint(cfg.host) : null;
-    mailConsole("TEST SEND failed", { to, ...smtp, hint });
-    resetTransporter();
-    activeProfile = null;
-    return {
-      sent: false,
-      subject,
-      error: hint ? `${smtp.message ?? "Test send failed"} — ${hint}` : smtp.message ?? "Test send failed",
-      hint,
-      smtp,
-    };
-  }
+  const html = `<p>This is a plain test email from the FG Media Hub API.</p><p>Time: ${new Date().toISOString()}</p><p>If you received this, SMTP delivery is working.</p>`;
+  const result = await sendEmailDetailed(to, subject, html);
+  return { subject, ...result };
 }
 
 export function sendEmailAsync(to: string, subject: string, html: string): void {

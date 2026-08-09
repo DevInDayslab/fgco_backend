@@ -3,7 +3,7 @@ import { z } from "zod";
 import { getMailConfig } from "../config/mail.js";
 import {
   getMailDiagnostics,
-  sendEmail,
+  sendEmailDetailed,
   sendSimpleTestEmail,
   verifySmtpConnection,
 } from "../utils/mailer.js";
@@ -102,28 +102,23 @@ export async function postMailTest(req: Request, res: Response) {
       const result = await sendSimpleTestEmail(to);
       res.json({
         ok: result.sent,
-        sent: result.sent,
         template,
         to,
-        subject: result.subject,
-        messageId: result.messageId,
-        error: result.error,
-        smtp: result.smtp,
+        ...result,
         durationMs: Date.now() - started,
       });
       return;
     }
 
     const email = buildTestEmail(template);
-    const sent = await sendEmail(to, email.subject, email.html);
+    const result = await sendEmailDetailed(to, email.subject, email.html);
 
     res.json({
-      ok: sent,
-      sent,
+      ok: result.sent,
       template,
       to,
       subject: email.subject,
-      error: sent ? undefined : "sendEmail returned false — check server logs",
+      ...result,
       durationMs: Date.now() - started,
     });
   } catch (err) {
