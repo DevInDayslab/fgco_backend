@@ -65,6 +65,12 @@ function resolveCorsOrigin(
     return;
   }
 
+  // FG Media production frontends
+  if (/^https:\/\/(www\.)?fgco\.in$/.test(origin)) {
+    callback(null, true);
+    return;
+  }
+
   // Allow any local dev port (Vite, TanStack Start, etc.)
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
     callback(null, true);
