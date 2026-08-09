@@ -36,8 +36,24 @@ export function getMailConfig(): MailConfig | null {
 export function logMailConfigStatus(): void {
   const cfg = getMailConfig();
   if (!cfg) {
-    logger.warn("SMTP not fully configured — email sending disabled until env is set");
+    const missing = [
+      !process.env.SMTP_HOST?.trim() && "SMTP_HOST",
+      !process.env.SMTP_USER?.trim() && "SMTP_USER",
+      !process.env.SMTP_PASS && "SMTP_PASS",
+      !process.env.MAIL_FROM?.trim() && "MAIL_FROM",
+    ].filter(Boolean);
+    logger.warn(
+      { missing },
+      "SMTP not fully configured — email sending disabled until env is set",
+    );
+    console.log(`[mail] STARTUP — missing env: ${missing.join(", ") || "unknown"}`);
     return;
   }
-  logger.info({ host: cfg.host, port: cfg.port, from: cfg.from }, "SMTP configuration loaded");
+  logger.info(
+    { host: cfg.host, port: cfg.port, secure: cfg.secure, from: cfg.from, user: cfg.user },
+    "SMTP configuration loaded",
+  );
+  console.log(
+    `[mail] STARTUP — loaded ${cfg.host}:${cfg.port} as ${cfg.user} (from ${cfg.from})`,
+  );
 }

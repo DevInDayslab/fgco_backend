@@ -45,9 +45,19 @@ import {
   postSponsorshipPayment,
   postSponsorshipRegister,
 } from "./routes/public.js";
+import { getMailStatus, postMailTest, postMailVerify } from "./routes/mailAdmin.js";
+import { runStartupMailCheck } from "./utils/mailer.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
 const app = express();
+
+// GoDaddy sits behind a reverse proxy and sets X-Forwarded-For. Required for
+// express-rate-limit and accurate req.ip (without this, rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR).
+const trustProxy = process.env.TRUST_PROXY?.trim();
+app.set(
+  "trust proxy",
+  trustProxy === "false" ? false : trustProxy ? Number(trustProxy) || 1 : 1,
+);
 
 // GoDaddy health probe — must respond 200 before any middleware that could fail
 app.get("/", (_req, res) => {
@@ -183,6 +193,9 @@ adminRouter.get("/sponsorships/:id", getSponsorshipById);
 adminRouter.patch("/sponsorships/:id", patchSponsorship);
 adminRouter.get("/files", getAdminFile);
 adminRouter.post("/send-invite", postSendInvite);
+adminRouter.get("/mail/status", getMailStatus);
+adminRouter.post("/mail/verify", postMailVerify);
+adminRouter.post("/mail/test", postMailTest);
 
 app.use("/api/admin", adminRouter);
 
@@ -218,6 +231,7 @@ app.listen(PORT, "0.0.0.0", () => {
   logger.info({ port: PORT, host: "0.0.0.0" }, "FG Media Hub API ready");
 
   logMailConfigStatus();
+  void runStartupMailCheck();
 
   // Non-blocking DB — do not await before listen
   initDatabase()

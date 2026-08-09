@@ -364,6 +364,16 @@ function queueApplicationEmails(params: {
 
     let receiptDelivered = params.skipReceipt === true || params.isSelf;
 
+    console.log(
+      `[mail] QUEUE nomination emails — ${messages.length} message(s)`,
+      JSON.stringify({
+        isSelf: params.isSelf,
+        nomineeEmail: params.nomineeEmail,
+        nominatorEmail: params.nominatorEmail,
+        labels: messages.map((m) => m.label),
+      }),
+    );
+
     for (const message of messages) {
       try {
         const sent = await sendEmail(message.to, message.subject, message.html);
