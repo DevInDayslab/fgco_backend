@@ -6,15 +6,15 @@ import { z } from "zod";
 import {
   getNominationFeeWithGstPaise,
   NOMINATION_GST_PERCENT_LABEL,
+  NOMINATION_SELF_FEE_INR,
 } from "../config/nomination.js";
 import {
-  getSponsorshipAdvanceWithGstPaise,
+  getSponsorshipPaymentPlan,
   getSponsorshipTier,
-  SPONSORSHIP_ADVANCE_PERCENT_LABEL,
   SPONSORSHIP_GST_PERCENT_LABEL,
 } from "../config/sponsorship.js";
 import {
-  parseRazorpayErrorMessage,
+  formatRazorpayOrderError,
   resolveRazorpayChargeAmount,
 } from "../config/razorpay.js";
 import { getDb } from "../db/index.js";
@@ -64,7 +64,9 @@ const nominationCreateOrderSchema = z.object({
   nominatorEmail: z.string().email().max(255),
   nominatorPhone: z.string().min(10).max(32),
   nomineeName: z.string().min(1).max(255),
+  nomineeEmail: z.string().email().max(255),
   category: z.string().min(1).max(255),
+  relationship: z.string().max(255).optional(),
 });
 
 const nominationPaymentSchema = z.object({
@@ -78,7 +80,9 @@ const nominationPaymentSchema = z.object({
   nominatorEmail: z.string().email().max(255).optional(),
   nominatorPhone: z.string().min(10).max(32).optional(),
   nomineeName: z.string().min(1).max(255).optional(),
+  nomineeEmail: z.string().email().max(255).optional(),
   category: z.string().max(255).optional(),
+  relationship: z.string().max(255).optional(),
 });
 
 const sponsorshipRegisterSchema = z.object({
@@ -223,10 +227,13 @@ async function sendSponsorshipConfirmationOnce(
   }
 
   const tier = getSponsorshipTier(reservation.tierId);
-  const committedAmountInr = tier?.amountInr ?? Math.round(payment.basePaise / 50); // 50% advance fallback
-  const advanceBaseInr = Math.round(payment.basePaise / 100);
-  const gstPaidInr = Math.round(payment.gstPaise / 100);
-  const amountPaidInr = Math.round(payment.amountPaise / 100);
+  const plan = getSponsorshipPaymentPlan(reservation.tierId);
+  const committedAmountInr = plan?.packageInr ?? tier?.amountInr ?? Math.round(payment.basePaise / 100);
+  const advanceBaseInr = plan?.razorpayBaseInr ?? Math.round(payment.basePaise / 100);
+  const gstPaidInr = plan?.razorpayGstInr ?? Math.round(payment.gstPaise / 100);
+  const amountPaidInr = plan?.razorpayTotalInr ?? Math.round(payment.amountPaise / 100);
+  const balanceTotalInr = plan?.balanceTotalInr ?? 0;
+  const committedTotalInr = plan?.committedTotalInr ?? committedAmountInr;
 
   const confirmation = getSponsorshipConfirmationEmail({
     contactName: reservation.contactName,
@@ -234,9 +241,11 @@ async function sendSponsorshipConfirmationOnce(
     tierName: reservation.tierName || tier?.name || "HIT ViERA Sponsor",
     referenceId: reservation.referenceId ?? reservation.tierId,
     committedAmountInr,
+    committedTotalInr,
     advanceBaseInr,
     gstPaidInr,
     amountPaidInr,
+    balanceTotalInr,
     transactionId: razorpayPaymentId,
   });
 
@@ -776,12 +785,21 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       return;
     }
 
-    const pricing = getNominationFeeWithGstPaise();
+    const nominatorEmail = normalizeEmail(parsed.data.nominatorEmail);
+    const nomineeEmail = normalizeEmail(parsed.data.nomineeEmail);
+    const isSelf = isSelfNomination(
+      { relationship: parsed.data.relationship },
+      nominatorEmail,
+      nomineeEmail,
+    );
+
+    const pricing = getNominationFeeWithGstPaise(isSelf);
     const { chargeAmountPaise, displayAmountPaise, isTestCharge } = resolveRazorpayChargeAmount(
       pricing.totalPaise,
       keyId,
     );
     const receipt = `nomination_${Date.now()}`;
+    const feeTypeLabel = isSelf ? "Self-nomination" : "Nominating another person";
 
     const response = await fetch("https://api.razorpay.com/v1/orders", {
       method: "POST",
@@ -798,7 +816,9 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
           nominatorEmail: parsed.data.nominatorEmail,
           nominatorPhone: parsed.data.nominatorPhone,
           nomineeName: parsed.data.nomineeName,
+          nomineeEmail: parsed.data.nomineeEmail,
           category: parsed.data.category,
+          isSelfNomination: isSelf ? "true" : "false",
           paymentType: "nomination_fee",
           basePaise: String(pricing.basePaise),
           gstPaise: String(pricing.gstPaise),
@@ -812,8 +832,8 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
     if (!response.ok) {
       const errorBody = await response.text();
       console.error("Razorpay nomination order error:", errorBody);
-      res.status(502).json({
-        error: parseRazorpayErrorMessage(errorBody),
+      res.status(400).json({
+        error: formatRazorpayOrderError(errorBody, keyId, chargeAmountPaise),
       });
       return;
     }
@@ -830,7 +850,8 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       isTestCharge,
       currency: "INR",
       keyId,
-      feeLabel: `Nomination fee — ₹ ${pricing.baseInr.toLocaleString("en-IN")} + ${NOMINATION_GST_PERCENT_LABEL} GST — ₹ ${pricing.totalInr.toLocaleString("en-IN")} total`,
+      feeLabel: `${feeTypeLabel} — ₹ ${pricing.baseInr.toLocaleString("en-IN")} + ${NOMINATION_GST_PERCENT_LABEL} GST — ₹ ${pricing.totalInr.toLocaleString("en-IN")} total`,
+      isSelfNomination: isSelf,
     });
   } catch (err) {
     console.error("Nomination create-order error:", err);
@@ -864,7 +885,9 @@ export async function postNominationPayment(req: Request, res: Response) {
     nominatorEmail,
     nominatorPhone,
     nomineeName,
+    nomineeEmail,
     category,
+    relationship,
   } = parsed.data;
 
   if (!verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature)) {
@@ -889,17 +912,23 @@ export async function postNominationPayment(req: Request, res: Response) {
   }
 
   const paymentId = randomUUID();
-  const base = basePaise ?? amountPaise;
-  const gst = gstPaise ?? 0;
-  const pricing = getNominationFeeWithGstPaise();
+  const isSelf =
+    nominatorEmail && nomineeEmail
+      ? isSelfNomination({ relationship }, normalizeEmail(nominatorEmail), normalizeEmail(nomineeEmail))
+      : basePaise === NOMINATION_SELF_FEE_INR * 100;
+  const pricing = getNominationFeeWithGstPaise(isSelf);
+  const base = basePaise ?? pricing.basePaise;
+  const gst = gstPaise ?? pricing.gstPaise;
   const paymentMetadata = {
     paymentType: "nomination_fee",
     baseInr: pricing.baseInr,
     gstInr: pricing.gstInr,
+    isSelfNomination: isSelf,
     contactName: nominatorName ?? null,
     contactEmail: nominatorEmail ?? null,
     contactPhone: nominatorPhone ?? null,
     nomineeName: nomineeName ?? null,
+    nomineeEmail: nomineeEmail ?? null,
     category: category ?? null,
     receiptEmailSent: false,
   };
@@ -940,16 +969,15 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
       return;
     }
 
-    const pricing = getSponsorshipAdvanceWithGstPaise(parsed.data.tierId);
+    const pricing = getSponsorshipPaymentPlan(parsed.data.tierId);
     if (!pricing) {
       res.status(400).json({ error: "Invalid sponsorship tier" });
       return;
     }
 
-    const { chargeAmountPaise, displayAmountPaise, isTestCharge } = resolveRazorpayChargeAmount(
-      pricing.totalPaise,
-      keyId,
-    );
+    const chargeAmountPaise = pricing.totalPaise;
+    const displayAmountPaise = pricing.totalPaise;
+    const isTestCharge = false;
     const receipt = `sponsor_${parsed.data.tierId}_${Date.now()}`;
 
     const response = await fetch("https://api.razorpay.com/v1/orders", {
@@ -974,8 +1002,10 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
           basePaise: String(pricing.basePaise),
           gstPaise: String(pricing.gstPaise),
           totalPaise: String(pricing.totalPaise),
+          committedTotalPaise: String(pricing.committedTotalInr * 100),
+          balanceTotalPaise: String(pricing.balanceTotalInr * 100),
           displayAmountPaise: String(displayAmountPaise),
-          isTestCharge: isTestCharge ? "true" : "false",
+          isTestCharge: "false",
         },
       }),
     });
@@ -983,8 +1013,8 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
     if (!response.ok) {
       const errorBody = await response.text();
       console.error("Razorpay order error:", errorBody);
-      res.status(502).json({
-        error: parseRazorpayErrorMessage(errorBody),
+      res.status(400).json({
+        error: formatRazorpayOrderError(errorBody, keyId, chargeAmountPaise),
       });
       return;
     }
@@ -1002,7 +1032,7 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
       currency: "INR",
       keyId,
       tierName: tier.name,
-      advanceLabel: `${SPONSORSHIP_ADVANCE_PERCENT_LABEL} advance — ₹ ${pricing.baseInr.toLocaleString("en-IN")} + ${SPONSORSHIP_GST_PERCENT_LABEL} GST — ₹ ${pricing.totalInr.toLocaleString("en-IN")} total`,
+      advanceLabel: `Razorpay payment — ₹ ${pricing.razorpayTotalInr.toLocaleString("en-IN")} incl. ${SPONSORSHIP_GST_PERCENT_LABEL} GST (balance ₹ ${pricing.balanceTotalInr.toLocaleString("en-IN")} via bank transfer)`,
     });
   } catch (err) {
     console.error("Sponsorship create-order error:", err);
@@ -1112,7 +1142,7 @@ export async function postSponsorshipPayment(req: Request, res: Response) {
   }
 
   const paymentId = randomUUID();
-  const pricing = getSponsorshipAdvanceWithGstPaise(reservation.tierId);
+  const pricing = getSponsorshipPaymentPlan(reservation.tierId);
   const base = pricing?.basePaise ?? basePaise ?? amountPaise;
   const gst = pricing?.gstPaise ?? gstPaise ?? 0;
   const recordedAmount = pricing?.totalPaise ?? amountPaise;
@@ -1123,6 +1153,8 @@ export async function postSponsorshipPayment(req: Request, res: Response) {
     contactName: reservation.contactName,
     contactEmail: reservation.contactEmail,
     contactPhone: reservation.contactPhone,
+    committedTotalInr: pricing?.committedTotalInr,
+    balanceTotalInr: pricing?.balanceTotalInr,
     receiptEmailSent: false,
   };
 

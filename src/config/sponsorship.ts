@@ -3,6 +3,9 @@ export const SPONSORSHIP_ADVANCE_PERCENT_LABEL = "50%";
 export const SPONSORSHIP_GST_RATE = 0.18;
 export const SPONSORSHIP_GST_PERCENT_LABEL = "18%";
 
+/** Razorpay per-order limit — sponsorship online payment is capped at this amount incl. GST. */
+export const RAZORPAY_SPONSORSHIP_MAX_INR = 500_000;
+
 export const SPONSORSHIP_TIERS = [
   { id: "super", name: "Super ViERA Sponsor", amountInr: 2000000 },
   { id: "power", name: "Power ViERA Sponsor", amountInr: 1500000 },
@@ -12,36 +15,83 @@ export const SPONSORSHIP_TIERS = [
 
 export type SponsorshipTierId = (typeof SPONSORSHIP_TIERS)[number]["id"];
 
+export type SponsorshipPaymentPlan = {
+  tierId: SponsorshipTierId;
+  packageInr: number;
+  packageGstInr: number;
+  committedTotalInr: number;
+  razorpayBaseInr: number;
+  razorpayGstInr: number;
+  razorpayTotalInr: number;
+  balanceBaseInr: number;
+  balanceGstInr: number;
+  balanceTotalInr: number;
+  baseInr: number;
+  gstInr: number;
+  totalInr: number;
+  basePaise: number;
+  gstPaise: number;
+  totalPaise: number;
+};
+
 export function getSponsorshipTier(tierId: string) {
   return SPONSORSHIP_TIERS.find((tier) => tier.id === tierId);
 }
 
-export function getSponsorshipAdvanceInr(tierId: string) {
+export function splitInrInclGst(totalInclGst: number) {
+  const baseInr = Math.round(totalInclGst / (1 + SPONSORSHIP_GST_RATE));
+  const gstInr = totalInclGst - baseInr;
+  return { baseInr, gstInr, totalInr: totalInclGst };
+}
+
+export function getSponsorshipPaymentPlan(tierId: string): SponsorshipPaymentPlan | null {
   const tier = getSponsorshipTier(tierId);
   if (!tier) return null;
-  return Math.round(tier.amountInr * SPONSORSHIP_ADVANCE_PERCENT);
+
+  const packageGstInr = Math.round(tier.amountInr * SPONSORSHIP_GST_RATE);
+  const committedTotalInr = tier.amountInr + packageGstInr;
+
+  const razorpay = splitInrInclGst(RAZORPAY_SPONSORSHIP_MAX_INR);
+  const balanceTotalInr = committedTotalInr - RAZORPAY_SPONSORSHIP_MAX_INR;
+  const balance = splitInrInclGst(balanceTotalInr);
+
+  return {
+    tierId: tier.id,
+    packageInr: tier.amountInr,
+    packageGstInr,
+    committedTotalInr,
+    razorpayBaseInr: razorpay.baseInr,
+    razorpayGstInr: razorpay.gstInr,
+    razorpayTotalInr: razorpay.totalInr,
+    balanceBaseInr: balance.baseInr,
+    balanceGstInr: balance.gstInr,
+    balanceTotalInr: balance.totalInr,
+    baseInr: razorpay.baseInr,
+    gstInr: razorpay.gstInr,
+    totalInr: razorpay.totalInr,
+    basePaise: razorpay.baseInr * 100,
+    gstPaise: razorpay.gstInr * 100,
+    totalPaise: razorpay.totalInr * 100,
+  };
 }
 
+/** @deprecated Use getSponsorshipPaymentPlan for Razorpay checkout amounts. */
+export function getSponsorshipAdvanceInr(tierId: string) {
+  return getSponsorshipPaymentPlan(tierId)?.razorpayBaseInr ?? null;
+}
+
+/** @deprecated Use getSponsorshipPaymentPlan for Razorpay checkout amounts. */
 export function getSponsorshipAdvanceWithGstInr(tierId: string) {
-  const baseInr = getSponsorshipAdvanceInr(tierId);
-  if (baseInr == null) return null;
-  const gstInr = Math.round(baseInr * SPONSORSHIP_GST_RATE);
+  const plan = getSponsorshipPaymentPlan(tierId);
+  if (!plan) return null;
   return {
-    baseInr,
-    gstInr,
-    totalInr: baseInr + gstInr,
+    baseInr: plan.razorpayBaseInr,
+    gstInr: plan.razorpayGstInr,
+    totalInr: plan.razorpayTotalInr,
   };
 }
 
+/** Razorpay order amount (₹5,00,000 incl. GST) and balance metadata. */
 export function getSponsorshipAdvanceWithGstPaise(tierId: string) {
-  const breakdown = getSponsorshipAdvanceWithGstInr(tierId);
-  if (!breakdown) return null;
-  const basePaise = breakdown.baseInr * 100;
-  const gstPaise = breakdown.gstInr * 100;
-  return {
-    basePaise,
-    gstPaise,
-    totalPaise: basePaise + gstPaise,
-    ...breakdown,
-  };
+  return getSponsorshipPaymentPlan(tierId);
 }

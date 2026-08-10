@@ -9,6 +9,7 @@ import { pinoHttp } from "pino-http";
 import { bootstrapAdminUser } from "./bootstrap/admin.js";
 import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
+import { logRazorpayConfigStatus } from "./config/razorpay.js";
 import { corsMiddleware } from "./middleware/cors.js";
 import {
   postAdminChangePassword,
@@ -231,6 +232,7 @@ app.listen(PORT, "0.0.0.0", () => {
   logger.info({ port: PORT, host: "0.0.0.0" }, "FG Media Hub API ready");
 
   logMailConfigStatus();
+  logRazorpayConfigStatus();
   void runStartupMailCheck();
 
   // Non-blocking DB — do not await before listen

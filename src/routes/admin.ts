@@ -15,6 +15,7 @@ import {
   formatAwardDateTime,
   getCeoNominationEmail,
 } from "../utils/templates.js";
+import { buildSponsorshipAdminPaymentSummary } from "../utils/sponsorship-admin-payment.js";
 
 type PaidNominationLookup = {
   nominationIds: Set<string>;
@@ -470,16 +471,46 @@ export async function getSponsorships(_req: Request, res: Response) {
       message: sponsorshipReservations.message,
       status: sponsorshipReservations.status,
       paymentId: sponsorshipReservations.paymentId,
+      spots: sponsorshipReservations.spots,
       createdAt: sponsorshipReservations.createdAt,
+      paymentStatus: payments.status,
+      paymentAmountPaise: payments.amountPaise,
+      razorpayPaymentId: payments.razorpayPaymentId,
     })
     .from(sponsorshipReservations)
+    .leftJoin(payments, eq(sponsorshipReservations.paymentId, payments.id))
     .orderBy(desc(sponsorshipReservations.createdAt));
 
   res.json({
-    items: rows.map((row) => ({
-      ...row,
-      paymentPaid: row.status === "confirmed" && Boolean(row.paymentId),
-    })),
+    items: rows.map((row) => {
+      const paymentPaid = row.status === "confirmed" && Boolean(row.paymentId);
+      const payment =
+        row.paymentId && row.paymentStatus
+          ? {
+              status: row.paymentStatus,
+              amountPaise: row.paymentAmountPaise ?? 0,
+              razorpayPaymentId: row.razorpayPaymentId,
+            }
+          : null;
+
+      return {
+        id: row.id,
+        referenceId: row.referenceId,
+        tierId: row.tierId,
+        tierName: row.tierName,
+        company: row.company,
+        contactName: row.contactName,
+        contactEmail: row.contactEmail,
+        contactPhone: row.contactPhone,
+        message: row.message,
+        status: row.status,
+        paymentId: row.paymentId,
+        spots: row.spots,
+        createdAt: row.createdAt,
+        paymentPaid,
+        payment: buildSponsorshipAdminPaymentSummary(row.tierId, row.status, payment),
+      };
+    }),
   });
 }
 
@@ -508,9 +539,58 @@ export async function getSponsorshipById(req: Request, res: Response) {
     return;
   }
 
+  let linkedPayment: {
+    status: string;
+    amountPaise: number;
+    razorpayPaymentId: string | null;
+    razorpayOrderId: string;
+    basePaise: number;
+    gstPaise: number;
+    metadata: unknown;
+    createdAt: Date;
+    updatedAt: Date;
+  } | null = null;
+
+  if (row.paymentId) {
+    const [payment] = await db
+      .select()
+      .from(payments)
+      .where(eq(payments.id, row.paymentId))
+      .limit(1);
+    linkedPayment = payment ?? null;
+  }
+
+  const paymentPaid = row.status === "confirmed" && Boolean(row.paymentId);
+  const paymentSummary = buildSponsorshipAdminPaymentSummary(
+    row.tierId,
+    row.status,
+    linkedPayment
+      ? {
+          status: linkedPayment.status,
+          amountPaise: linkedPayment.amountPaise,
+          razorpayPaymentId: linkedPayment.razorpayPaymentId,
+        }
+      : null,
+  );
+
   res.json({
     ...row,
-    paymentPaid: row.status === "confirmed" && Boolean(row.paymentId),
+    paymentPaid,
+    payment: paymentSummary,
+    paymentRecord: linkedPayment
+      ? {
+          id: row.paymentId,
+          razorpayOrderId: linkedPayment.razorpayOrderId,
+          razorpayPaymentId: linkedPayment.razorpayPaymentId,
+          status: linkedPayment.status,
+          amountInr: linkedPayment.amountPaise / 100,
+          baseInr: linkedPayment.basePaise / 100,
+          gstInr: linkedPayment.gstPaise / 100,
+          createdAt: linkedPayment.createdAt,
+          updatedAt: linkedPayment.updatedAt,
+          metadata: linkedPayment.metadata,
+        }
+      : null,
   });
 }
 

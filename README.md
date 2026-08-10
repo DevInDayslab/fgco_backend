@@ -64,7 +64,11 @@ Set variables in GoDaddy’s environment panel (never commit `.env`).
 | `ADMIN_PASSCODE` | Optional bootstrap fallback if `ADMIN_PASSWORD` is unset |
 | `ADMIN_JWT_SECRET` | Secret used to sign admin JWTs (required) |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | Outbound email |
-| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Payments (when wired) |
+| `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` | Razorpay live/test keys (backend only) |
+| `RAZORPAY_CHARGE_OVERRIDE_PAISE` | Optional fixed charge in paise (e.g. `10000` = ₹100) for live-key testing; remove in production |
+| `RAZORPAY_WEBHOOK_SECRET` | Razorpay webhook signature verification |
+
+On startup the API logs `[razorpay] LIVE keys loaded` or `TEST (max ₹5,00,000/order)`. High-tier sponsorship advances (e.g. Power at ₹8,85,000) require a **live** Razorpay account whose per-transaction limit is high enough — raise it in the Razorpay Dashboard or contact Razorpay support if you see “Amount exceeds maximum amount allowed”.
 
 Do **not** set `LOCAL_DB_*` on production unless you intentionally want to override GoDaddy Hosted Database credentials.
 

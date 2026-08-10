@@ -673,12 +673,16 @@ export type SponsorshipConfirmationEmailParams = {
   referenceId: string;
   /** Full sponsorship package value (ex-GST). */
   committedAmountInr: number;
-  /** Advance base before GST. */
+  /** Total package value incl. GST. */
+  committedTotalInr: number;
+  /** Razorpay taxable portion (ex-GST). */
   advanceBaseInr: number;
-  /** GST collected on the advance. */
+  /** GST collected on the Razorpay payment. */
   gstPaidInr: number;
-  /** Total amount charged now (advance + GST). */
+  /** Total amount charged via Razorpay (incl. GST). */
   amountPaidInr: number;
+  /** Remaining balance incl. GST — payable via bank transfer. */
+  balanceTotalInr: number;
   transactionId: string;
   date?: string;
 };
@@ -688,7 +692,6 @@ export function getSponsorshipConfirmationEmail(
 ): EmailTemplate {
   const year = getAwardsProgrammeYear();
   const date = params.date ?? formatAwardDateTime();
-  const balanceDueInr = Math.max(0, params.committedAmountInr - params.advanceBaseInr);
 
   const body = `
     ${heroBlock("Official Sponsorship Confirmation")}
@@ -702,7 +705,7 @@ export function getSponsorshipConfirmationEmail(
         On behalf of <strong style="color:${GOLD};">FG Media Group</strong> and the HIT ViERA National Awards ${year} organising committee, we are delighted to confirm your sponsorship partnership.
       </p>
       <p style="margin:0 0 20px;font-size:15px;line-height:1.8;color:${TEXT};">
-        Your advance payment has been received successfully, and your sponsorship slot for
+        Your Razorpay payment of <strong style="color:${GOLD};">${escapeHtml(formatInr(params.amountPaidInr))}</strong> (incl. GST) has been received successfully, and your sponsorship slot for
         <strong style="color:${GOLD};">${escapeHtml(params.tierName)}</strong> under
         <strong style="color:${GOLD};">${escapeHtml(params.company)}</strong> is now reserved.
       </p>
@@ -721,28 +724,28 @@ export function getSponsorshipConfirmationEmail(
       <p style="margin:8px 0 12px;font-size:10px;letter-spacing:3px;color:${GOLD};text-transform:uppercase;text-align:center;">&#9670; Financial Summary &#9670;</p>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 24px;border:1px solid #3a2c08;background:#0f0f1c;">
         <tr>
-          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Total Committed (Package)</td>
-          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:18px;font-weight:bold;color:${GOLD_LIGHT};text-align:right;">${escapeHtml(formatInr(params.committedAmountInr))}</td>
+          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Total Committed (incl. GST)</td>
+          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:18px;font-weight:bold;color:${GOLD_LIGHT};text-align:right;">${escapeHtml(formatInr(params.committedTotalInr))}</td>
         </tr>
         <tr>
-          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Advance (50%)</td>
+          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Paid via Razorpay (ex-GST)</td>
           <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:14px;color:${TEXT};text-align:right;">${escapeHtml(formatInr(params.advanceBaseInr))}</td>
         </tr>
         <tr>
-          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">GST on Advance (18%)</td>
+          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">GST on Razorpay Payment (18%)</td>
           <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:14px;color:${TEXT};text-align:right;">${escapeHtml(formatInr(params.gstPaidInr))}</td>
         </tr>
         <tr>
-          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Already Paid</td>
+          <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Already Paid (Razorpay)</td>
           <td style="padding:14px 20px;border-bottom:1px solid #3a2c08;font-size:20px;font-weight:bold;color:${GOLD_LIGHT};text-align:right;">${escapeHtml(formatInr(params.amountPaidInr))}</td>
         </tr>
         <tr>
-          <td style="padding:14px 20px;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Balance Due (ex-GST)</td>
-          <td style="padding:14px 20px;font-size:16px;font-weight:bold;color:${GOLD};text-align:right;">${escapeHtml(formatInr(balanceDueInr))}</td>
+          <td style="padding:14px 20px;font-size:12px;color:#8a8070;text-transform:uppercase;letter-spacing:1px;">Balance Due (Bank Transfer, incl. GST)</td>
+          <td style="padding:14px 20px;font-size:16px;font-weight:bold;color:${GOLD};text-align:right;">${escapeHtml(formatInr(params.balanceTotalInr))}</td>
         </tr>
       </table>
       <p style="margin:0 0 20px;font-size:14px;line-height:1.8;color:${TEXT};">
-        The balance of <strong style="color:${GOLD};">${escapeHtml(formatInr(balanceDueInr))}</strong> remains payable as per sponsorship terms. Applicable GST on the balance will be collected at the time of settlement. Our corporate relations team will share the next steps and deliverables shortly.
+        The balance of <strong style="color:${GOLD};">${escapeHtml(formatInr(params.balanceTotalInr))}</strong> is payable via bank transfer as per sponsorship terms. Our corporate relations team will contact you with bank details and next steps shortly.
       </p>
       <p style="margin:0 0 20px;font-size:14px;line-height:1.8;color:${TEXT};">
         For any assistance, contact us at <strong style="color:${GOLD};">pro@fgco.in</strong> or <strong style="color:${GOLD};">contact@fgco.in</strong>.
