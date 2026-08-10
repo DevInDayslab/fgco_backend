@@ -52,7 +52,7 @@ function buildTestEmail(template: Exclude<z.infer<typeof mailTestSchema>["templa
         SAMPLE.category,
       );
     case "payment_receipt":
-      return getPaymentReceiptEmail(SAMPLE.nominatorName, 23600, SAMPLE.transactionId);
+      return getPaymentReceiptEmail(SAMPLE.nominatorName, 20_000, SAMPLE.transactionId);
     case "sponsorship_confirmation":
       return getSponsorshipConfirmationEmail({
         contactName: SAMPLE.nominatorName,

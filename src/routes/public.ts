@@ -4,8 +4,7 @@ import type { Request, Response } from "express";
 import pino from "pino";
 import { z } from "zod";
 import {
-  getNominationFeeWithGstPaise,
-  NOMINATION_GST_PERCENT_LABEL,
+  getNominationFeePaise,
   NOMINATION_SELF_FEE_INR,
 } from "../config/nomination.js";
 import {
@@ -793,7 +792,7 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       nomineeEmail,
     );
 
-    const pricing = getNominationFeeWithGstPaise(isSelf);
+    const pricing = getNominationFeePaise(isSelf);
     const { chargeAmountPaise, displayAmountPaise, isTestCharge } = resolveRazorpayChargeAmount(
       pricing.totalPaise,
       keyId,
@@ -850,7 +849,7 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       isTestCharge,
       currency: "INR",
       keyId,
-      feeLabel: `${feeTypeLabel} — ₹ ${pricing.baseInr.toLocaleString("en-IN")} + ${NOMINATION_GST_PERCENT_LABEL} GST — ₹ ${pricing.totalInr.toLocaleString("en-IN")} total`,
+      feeLabel: `${feeTypeLabel} — ₹ ${pricing.totalInr.toLocaleString("en-IN")}`,
       isSelfNomination: isSelf,
     });
   } catch (err) {
@@ -916,7 +915,7 @@ export async function postNominationPayment(req: Request, res: Response) {
     nominatorEmail && nomineeEmail
       ? isSelfNomination({ relationship }, normalizeEmail(nominatorEmail), normalizeEmail(nomineeEmail))
       : basePaise === NOMINATION_SELF_FEE_INR * 100;
-  const pricing = getNominationFeeWithGstPaise(isSelf);
+  const pricing = getNominationFeePaise(isSelf);
   const base = basePaise ?? pricing.basePaise;
   const gst = gstPaise ?? pricing.gstPaise;
   const paymentMetadata = {
