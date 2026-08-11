@@ -16,6 +16,7 @@ import {
   getCeoNominationEmail,
 } from "../utils/templates.js";
 import { buildSponsorshipAdminPaymentSummary } from "../utils/sponsorship-admin-payment.js";
+import { resolvePaymentContactFields } from "../utils/payment-admin-contact.js";
 
 type PaidNominationLookup = {
   nominationIds: Set<string>;
@@ -308,13 +309,53 @@ export async function getPayments(_req: Request, res: Response) {
       type: payments.type,
       metadata: payments.metadata,
       createdAt: payments.createdAt,
+      nominatorName: nominations.nominatorName,
+      nominatorEmail: nominations.nominatorEmail,
+      nominatorPhone: nominations.nominatorPhone,
+      nomineeName: nominations.nomineeName,
+      nomineeEmail: nominations.nomineeEmail,
+      nominationCategory: nominations.category,
+      nominationReferenceId: nominations.referenceId,
+      sponsorshipCompany: sponsorshipReservations.company,
+      sponsorshipContactName: sponsorshipReservations.contactName,
+      sponsorshipContactEmail: sponsorshipReservations.contactEmail,
+      sponsorshipContactPhone: sponsorshipReservations.contactPhone,
+      sponsorshipReferenceId: sponsorshipReservations.referenceId,
+      sponsorshipTierName: sponsorshipReservations.tierName,
     })
     .from(payments)
+    .leftJoin(nominations, eq(nominations.paymentId, payments.id))
+    .leftJoin(sponsorshipReservations, eq(sponsorshipReservations.paymentId, payments.id))
     .orderBy(desc(payments.createdAt));
 
   res.json({
     items: rows.map((row) => {
-      const meta = (row.metadata ?? {}) as Record<string, unknown>;
+      const contact = resolvePaymentContactFields({
+        metadata: row.metadata,
+        type: row.type,
+        nomination: row.nominatorName
+          ? {
+              nominatorName: row.nominatorName,
+              nominatorEmail: row.nominatorEmail,
+              nominatorPhone: row.nominatorPhone,
+              nomineeName: row.nomineeName,
+              nomineeEmail: row.nomineeEmail,
+              category: row.nominationCategory,
+              referenceId: row.nominationReferenceId,
+            }
+          : null,
+        sponsorship: row.sponsorshipContactName
+          ? {
+              company: row.sponsorshipCompany,
+              contactName: row.sponsorshipContactName,
+              contactEmail: row.sponsorshipContactEmail,
+              contactPhone: row.sponsorshipContactPhone,
+              referenceId: row.sponsorshipReferenceId,
+              tierName: row.sponsorshipTierName,
+            }
+          : null,
+      });
+
       return {
         id: row.id,
         razorpayOrderId: row.razorpayOrderId,
@@ -323,10 +364,7 @@ export async function getPayments(_req: Request, res: Response) {
         status: row.status,
         type: row.type,
         createdAt: row.createdAt,
-        contactName: typeof meta.contactName === "string" ? meta.contactName : null,
-        contactPhone: typeof meta.contactPhone === "string" ? meta.contactPhone : null,
-        contactEmail: typeof meta.contactEmail === "string" ? meta.contactEmail : null,
-        company: typeof meta.company === "string" ? meta.company : null,
+        ...contact,
       };
     }),
   });
@@ -352,11 +390,52 @@ export async function getPaymentById(req: Request, res: Response) {
     return;
   }
 
+  const [nomination] = await db
+    .select()
+    .from(nominations)
+    .where(eq(nominations.paymentId, id))
+    .limit(1);
+
+  const [sponsorship] = await db
+    .select()
+    .from(sponsorshipReservations)
+    .where(eq(sponsorshipReservations.paymentId, id))
+    .limit(1);
+
+  const contact = resolvePaymentContactFields({
+    metadata: row.metadata,
+    type: row.type,
+    nomination: nomination
+      ? {
+          nominatorName: nomination.nominatorName,
+          nominatorEmail: nomination.nominatorEmail,
+          nominatorPhone: nomination.nominatorPhone,
+          nomineeName: nomination.nomineeName,
+          nomineeEmail: nomination.nomineeEmail,
+          category: nomination.category,
+          referenceId: nomination.referenceId,
+        }
+      : null,
+    sponsorship: sponsorship
+      ? {
+          company: sponsorship.company,
+          contactName: sponsorship.contactName,
+          contactEmail: sponsorship.contactEmail,
+          contactPhone: sponsorship.contactPhone,
+          referenceId: sponsorship.referenceId,
+          tierName: sponsorship.tierName,
+        }
+      : null,
+  });
+
   res.json({
     ...row,
     amountInr: row.amountPaise / 100,
     baseInr: row.basePaise / 100,
     gstInr: row.gstPaise / 100,
+    ...contact,
+    linkedNominationId: nomination?.id ?? null,
+    linkedSponsorshipId: sponsorship?.id ?? null,
   });
 }
 
