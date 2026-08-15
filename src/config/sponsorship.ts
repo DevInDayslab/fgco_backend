@@ -11,6 +11,7 @@ export const SPONSORSHIP_TIERS = [
   { id: "power", name: "Power ViERA Sponsor", amountInr: 1500000 },
   { id: "golden", name: "Golden ViERA Sponsor", amountInr: 1000000 },
   { id: "silver", name: "Silver ViERA Sponsor", amountInr: 500000 },
+  { id: "circle", name: "HIT ViERA Circle of Excellence", amountInr: 50000 },
 ] as const;
 
 export type SponsorshipTierId = (typeof SPONSORSHIP_TIERS)[number]["id"];
@@ -51,8 +52,9 @@ export function getSponsorshipPaymentPlan(tierId: string): SponsorshipPaymentPla
   const packageGstInr = Math.round(tier.amountInr * SPONSORSHIP_GST_RATE);
   const committedTotalInr = tier.amountInr + packageGstInr;
 
-  const razorpay = splitInrInclGst(RAZORPAY_SPONSORSHIP_MAX_INR);
-  const balanceTotalInr = committedTotalInr - RAZORPAY_SPONSORSHIP_MAX_INR;
+  const razorpayTotalInr = Math.min(committedTotalInr, RAZORPAY_SPONSORSHIP_MAX_INR);
+  const razorpay = splitInrInclGst(razorpayTotalInr);
+  const balanceTotalInr = Math.max(0, committedTotalInr - razorpayTotalInr);
   const balance = splitInrInclGst(balanceTotalInr);
 
   return {

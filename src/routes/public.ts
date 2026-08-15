@@ -95,7 +95,7 @@ const sponsorshipRegisterSchema = z.object({
 });
 
 const sponsorshipCreateOrderSchema = z.object({
-  tierId: z.enum(["super", "power", "golden", "silver"]),
+  tierId: z.enum(["super", "power", "golden", "silver", "circle"]),
   company: z.string().min(1).max(255),
   contactName: z.string().min(1).max(255),
   contactEmail: z.string().email().max(255),
