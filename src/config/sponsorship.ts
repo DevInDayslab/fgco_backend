@@ -1,3 +1,5 @@
+import { applyPasscodeDiscountToInr } from "../utils/passcode-discount.js";
+
 export const SPONSORSHIP_ADVANCE_PERCENT = 0.5;
 export const SPONSORSHIP_ADVANCE_PERCENT_LABEL = "50%";
 export const SPONSORSHIP_GST_RATE = 0.18;
@@ -96,4 +98,40 @@ export function getSponsorshipAdvanceWithGstInr(tierId: string) {
 /** Razorpay order amount (₹5,00,000 incl. GST) and balance metadata. */
 export function getSponsorshipAdvanceWithGstPaise(tierId: string) {
   return getSponsorshipPaymentPlan(tierId);
+}
+
+export function applyPasscodeToSponsorshipPlan(
+  plan: SponsorshipPaymentPlan,
+  discountType: "PERCENTAGE" | "FREE",
+  discountValue: number,
+): SponsorshipPaymentPlan {
+  const committedTotalInr = applyPasscodeDiscountToInr(
+    plan.committedTotalInr,
+    discountType,
+    discountValue,
+  );
+  const razorpayTotalInr = Math.min(committedTotalInr, RAZORPAY_SPONSORSHIP_MAX_INR);
+  const razorpay = splitInrInclGst(razorpayTotalInr);
+  const balanceTotalInr = Math.max(0, committedTotalInr - razorpayTotalInr);
+  const balance = splitInrInclGst(balanceTotalInr);
+  const packageGstInr = Math.round(plan.packageInr * SPONSORSHIP_GST_RATE);
+
+  return {
+    tierId: plan.tierId,
+    packageInr: plan.packageInr,
+    packageGstInr,
+    committedTotalInr,
+    razorpayBaseInr: razorpay.baseInr,
+    razorpayGstInr: razorpay.gstInr,
+    razorpayTotalInr: razorpay.totalInr,
+    balanceBaseInr: balance.baseInr,
+    balanceGstInr: balance.gstInr,
+    balanceTotalInr: balance.totalInr,
+    baseInr: razorpay.baseInr,
+    gstInr: razorpay.gstInr,
+    totalInr: razorpay.totalInr,
+    basePaise: razorpay.baseInr * 100,
+    gstPaise: razorpay.gstInr * 100,
+    totalPaise: razorpay.totalInr * 100,
+  };
 }

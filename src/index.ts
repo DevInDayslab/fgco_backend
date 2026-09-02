@@ -47,6 +47,8 @@ import {
   postSponsorshipPayment,
   postSponsorshipRegister,
 } from "./routes/public.js";
+import { postPasscodesCheck, postPasscodesValidate } from "./routes/passcodes.js";
+import { postAdminPasscodesGenerate } from "./routes/passcodesAdmin.js";
 import { getMailStatus, postMailTest, postMailVerify } from "./routes/mailAdmin.js";
 import {
   getNotificationScenarios,
@@ -129,6 +131,14 @@ const adminLoginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many login attempts. Try again later." },
 });
+
+const passcodeCheckLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many passcode attempts. Try again later." },
+});
 app.post(
   "/api/payments/webhook",
   express.raw({ type: "application/json" }),
@@ -172,6 +182,8 @@ function handleUpload(req: Request, res: Response, next: NextFunction) {
 
 app.post("/api/uploads", handleUpload, postUpload);
 app.post("/api/contact", postContact);
+app.post("/api/passcodes/check", passcodeCheckLimiter, postPasscodesCheck);
+app.post("/api/passcodes/validate", passcodeCheckLimiter, postPasscodesValidate);
 app.post("/api/nominations/create-order", postNominationCreateOrder);
 app.post("/api/nominations/complete-payment", postNominationPayment);
 app.post("/api/nominations/check-email", postCheckNomineeEmail);
@@ -200,6 +212,7 @@ adminRouter.get("/sponsorships/:id", getSponsorshipById);
 adminRouter.patch("/sponsorships/:id", patchSponsorship);
 adminRouter.get("/files", getAdminFile);
 adminRouter.post("/send-invite", postSendInvite);
+adminRouter.post("/passcodes/generate", postAdminPasscodesGenerate);
 adminRouter.get("/mail/status", getMailStatus);
 adminRouter.post("/mail/verify", postMailVerify);
 adminRouter.post("/mail/test", postMailTest);

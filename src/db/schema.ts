@@ -1,4 +1,5 @@
 import {
+  boolean,
   int,
   json,
   mysqlEnum,
@@ -89,3 +90,21 @@ export const contactInquiries = mysqlTable("contact_inquiries", {
   message: varchar("message", { length: 5000 }).notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
+
+export const passcodes = mysqlTable(
+  "passcodes",
+  {
+    id: varchar("id", { length: 36 }).primaryKey(),
+    code: varchar("code", { length: 32 }).notNull(),
+    employeeName: varchar("employee_name", { length: 255 }).notNull(),
+    employeeEmail: varchar("employee_email", { length: 255 }).notNull(),
+    employeePhone: varchar("employee_phone", { length: 32 }).notNull(),
+    discountType: mysqlEnum("discount_type", ["PERCENTAGE", "FREE"]).notNull(),
+    discountValue: int("discount_value").notNull(),
+    isUsed: boolean("is_used").notNull().default(false),
+    usedAt: timestamp("used_at"),
+    batchId: varchar("batch_id", { length: 36 }).notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+  },
+  (table) => [uniqueIndex("passcodes_code_uidx").on(table.code)],
+);

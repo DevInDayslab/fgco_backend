@@ -8,6 +8,7 @@ import {
   NOMINATION_SELF_FEE_INR,
 } from "../config/nomination.js";
 import {
+  applyPasscodeToSponsorshipPlan,
   getSponsorshipPaymentPlan,
   getSponsorshipTier,
   SPONSORSHIP_GST_PERCENT_LABEL,
@@ -23,6 +24,12 @@ import {
   payments,
   sponsorshipReservations,
 } from "../db/schema.js";
+import { applyPasscodeDiscountToPaise } from "../utils/passcode-discount.js";
+import {
+  markPasscodeUsed,
+  resolvePasscodeForCheckout,
+  type ResolvedPasscode,
+} from "../utils/passcode-resolve.js";
 import { sendEmail, sendEmailAsync } from "../utils/mailer.js";
 import { getNomineeEmail, getNomineePhone, isSelfNomination } from "../utils/nomination-email.js";
 import { sendLiveairSMSAsync } from "../utils/sms.js";
@@ -59,15 +66,44 @@ const applicationSchema = z.object({
   videoKey: z.string().max(512).optional(),
 });
 
-const nominationCreateOrderSchema = z.object({
-  nominatorName: z.string().min(1).max(255),
-  nominatorEmail: z.string().email().max(255),
-  nominatorPhone: z.string().min(10).max(32),
-  nomineeName: z.string().min(1).max(255),
-  nomineeEmail: z.string().email().max(255),
-  category: z.string().min(1).max(255),
-  relationship: z.string().max(255).optional(),
-});
+const passcodeReferralFields = {
+  passcodeCode: z.string().trim().min(1).optional(),
+  employeeName: z.string().trim().min(1).optional(),
+  employeeEmail: z.string().trim().email().optional(),
+  employeePhone: z.string().trim().min(1).optional(),
+};
+
+function passcodeReferralRefine(
+  data: {
+    passcodeCode?: string;
+    employeeName?: string;
+    employeeEmail?: string;
+    employeePhone?: string;
+  },
+  ctx: z.RefinementCtx,
+) {
+  const fields = [data.passcodeCode, data.employeeName, data.employeeEmail, data.employeePhone];
+  const provided = fields.filter(Boolean).length;
+  if (provided > 0 && provided < 4) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Passcode referral requires code and all employee details",
+    });
+  }
+}
+
+const nominationCreateOrderSchema = z
+  .object({
+    nominatorName: z.string().min(1).max(255),
+    nominatorEmail: z.string().email().max(255),
+    nominatorPhone: z.string().min(10).max(32),
+    nomineeName: z.string().min(1).max(255),
+    nomineeEmail: z.string().email().max(255),
+    category: z.string().min(1).max(255),
+    relationship: z.string().max(255).optional(),
+    ...passcodeReferralFields,
+  })
+  .superRefine(passcodeReferralRefine);
 
 const nominationPaymentSchema = z.object({
   razorpayOrderId: z.string().min(1),
@@ -83,6 +119,7 @@ const nominationPaymentSchema = z.object({
   nomineeEmail: z.string().email().max(255).optional(),
   category: z.string().max(255).optional(),
   relationship: z.string().max(255).optional(),
+  passcodeId: z.string().uuid().optional(),
 });
 
 const sponsorshipRegisterSchema = z.object({
@@ -95,14 +132,17 @@ const sponsorshipRegisterSchema = z.object({
   message: z.string().max(2000).optional(),
 });
 
-const sponsorshipCreateOrderSchema = z.object({
-  tierId: z.enum(["super", "power", "golden", "silver", "circle"]),
-  company: z.string().min(1).max(255),
-  contactName: z.string().min(1).max(255),
-  contactEmail: z.string().email().max(255),
-  contactPhone: z.string().min(10).max(32),
-  reservationId: z.string().uuid().optional(),
-});
+const sponsorshipCreateOrderSchema = z
+  .object({
+    tierId: z.enum(["super", "power", "golden", "silver", "circle"]),
+    company: z.string().min(1).max(255),
+    contactName: z.string().min(1).max(255),
+    contactEmail: z.string().email().max(255),
+    contactPhone: z.string().min(10).max(32),
+    reservationId: z.string().uuid().optional(),
+    ...passcodeReferralFields,
+  })
+  .superRefine(passcodeReferralRefine);
 
 const sponsorshipPaymentSchema = z.object({
   reservationId: z.string().min(1),
@@ -112,10 +152,58 @@ const sponsorshipPaymentSchema = z.object({
   amountPaise: z.number().int().positive(),
   basePaise: z.number().int().nonnegative().optional(),
   gstPaise: z.number().int().nonnegative().optional(),
+  passcodeId: z.string().uuid().optional(),
 });
 
 function makeReference(prefix: string) {
   return `${prefix}-${Date.now().toString(36).toUpperCase()}`;
+}
+
+async function resolveOptionalPasscodeReferral(
+  data: {
+    passcodeCode?: string;
+    employeeName?: string;
+    employeeEmail?: string;
+    employeePhone?: string;
+  },
+  res: Response,
+): Promise<ResolvedPasscode | null | undefined> {
+  if (!data.passcodeCode) {
+    return null;
+  }
+
+  const db = getDb();
+  if (!db) {
+    res.status(503).json({ error: "Database unavailable" });
+    return undefined;
+  }
+
+  const result = await resolvePasscodeForCheckout(db, data.passcodeCode, {
+    employeeName: data.employeeName!,
+    employeeEmail: data.employeeEmail!,
+    employeePhone: data.employeePhone!,
+  });
+
+  if (!result.ok) {
+    res.status(400).json({ error: result.error });
+    return undefined;
+  }
+
+  return result.passcode;
+}
+
+async function consumePasscodeIfPresent(passcodeId?: string) {
+  if (!passcodeId) return;
+  const db = getDb();
+  if (!db) return;
+  await markPasscodeUsed(db, passcodeId);
+}
+
+async function consumePasscodeFromWebhookNotes(notes: Record<string, unknown>) {
+  const passcodeId = notes.passcodeId;
+  if (typeof passcodeId === "string" && passcodeId.length > 0) {
+    await consumePasscodeIfPresent(passcodeId);
+  }
 }
 
 function verifyRazorpaySignature(orderId: string, paymentId: string, signature: string) {
@@ -829,12 +917,13 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       return;
     }
 
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    if (!keyId || !keySecret) {
-      res.status(503).json({ error: "Payment gateway is not configured" });
+    const resolvedPasscode = await resolveOptionalPasscodeReferral(parsed.data, res);
+    if (resolvedPasscode === undefined) {
       return;
     }
+
+    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
 
     const nominatorEmail = normalizeEmail(parsed.data.nominatorEmail);
     const nomineeEmail = normalizeEmail(parsed.data.nomineeEmail);
@@ -845,12 +934,72 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
     );
 
     const pricing = getNominationFeePaise(isSelf);
+    let totalPaise = pricing.totalPaise;
+    if (resolvedPasscode) {
+      totalPaise = applyPasscodeDiscountToPaise(
+        pricing.totalPaise,
+        resolvedPasscode.discountType,
+        resolvedPasscode.discountValue,
+      );
+    }
+
+    const feeTypeLabel = isSelf ? "Self-nomination" : "Nominating another person";
+    const discountedTotalInr = totalPaise / 100;
+
+    if (totalPaise === 0) {
+      const db = getDb();
+      if (!db) {
+        res.status(503).json({ error: "Database unavailable" });
+        return;
+      }
+
+      const paymentId = randomUUID();
+      await db.insert(payments).values({
+        id: paymentId,
+        type: "nomination",
+        razorpayOrderId: `passcode_free_${paymentId}`,
+        amountPaise: 0,
+        basePaise: 0,
+        gstPaise: 0,
+        status: "paid",
+        metadata: {
+          paymentType: "nomination_fee",
+          passcodeId: resolvedPasscode!.id,
+          passcodeCode: resolvedPasscode!.code,
+          isSelfNomination: isSelf,
+          freePasscodeBypass: true,
+        },
+      });
+      await consumePasscodeIfPresent(resolvedPasscode!.id);
+
+      res.json({
+        freeBypass: true,
+        paymentId,
+        amount: 0,
+        displayAmountPaise: 0,
+        basePaise: 0,
+        gstPaise: 0,
+        totalPaise: 0,
+        isTestCharge: false,
+        currency: "INR",
+        keyId: keyId ?? "",
+        feeLabel: `${feeTypeLabel} — ₹ 0 (referral passcode)`,
+        isSelfNomination: isSelf,
+        passcodeId: resolvedPasscode!.id,
+      });
+      return;
+    }
+
+    if (!keyId || !keySecret) {
+      res.status(503).json({ error: "Payment gateway is not configured" });
+      return;
+    }
+
     const { chargeAmountPaise, displayAmountPaise, isTestCharge } = resolveRazorpayChargeAmount(
-      pricing.totalPaise,
+      totalPaise,
       keyId,
     );
     const receipt = `nomination_${Date.now()}`;
-    const feeTypeLabel = isSelf ? "Self-nomination" : "Nominating another person";
 
     const response = await fetch("https://api.razorpay.com/v1/orders", {
       method: "POST",
@@ -871,11 +1020,17 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
           category: parsed.data.category,
           isSelfNomination: isSelf ? "true" : "false",
           paymentType: "nomination_fee",
-          basePaise: String(pricing.basePaise),
-          gstPaise: String(pricing.gstPaise),
-          totalPaise: String(pricing.totalPaise),
+          basePaise: String(totalPaise),
+          gstPaise: "0",
+          totalPaise: String(totalPaise),
           displayAmountPaise: String(displayAmountPaise),
           isTestCharge: isTestCharge ? "true" : "false",
+          ...(resolvedPasscode
+            ? {
+                passcodeId: resolvedPasscode.id,
+                passcodeCode: resolvedPasscode.code,
+              }
+            : {}),
         },
       }),
     });
@@ -895,14 +1050,15 @@ export async function postNominationCreateOrder(req: Request, res: Response) {
       orderId: order.id,
       amount: chargeAmountPaise,
       displayAmountPaise,
-      basePaise: pricing.basePaise,
-      gstPaise: pricing.gstPaise,
-      totalPaise: pricing.totalPaise,
+      basePaise: totalPaise,
+      gstPaise: 0,
+      totalPaise,
       isTestCharge,
       currency: "INR",
       keyId,
-      feeLabel: `${feeTypeLabel} — ₹ ${pricing.totalInr.toLocaleString("en-IN")}`,
+      feeLabel: `${feeTypeLabel} — ₹ ${discountedTotalInr.toLocaleString("en-IN")}`,
       isSelfNomination: isSelf,
+      ...(resolvedPasscode ? { passcodeId: resolvedPasscode.id } : {}),
     });
   } catch (err) {
     console.error("Nomination create-order error:", err);
@@ -939,6 +1095,7 @@ export async function postNominationPayment(req: Request, res: Response) {
     nomineeEmail,
     category,
     relationship,
+    passcodeId,
   } = parsed.data;
 
   if (!verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature)) {
@@ -996,6 +1153,8 @@ export async function postNominationPayment(req: Request, res: Response) {
     metadata: paymentMetadata,
   });
 
+  await consumePasscodeIfPresent(passcodeId);
+
   res.json({ ok: true, paymentId });
 }
 
@@ -1007,6 +1166,11 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
       return;
     }
 
+    const resolvedPasscode = await resolveOptionalPasscodeReferral(parsed.data, res);
+    if (resolvedPasscode === undefined) {
+      return;
+    }
+
     const tier = getSponsorshipTier(parsed.data.tierId);
     if (!tier) {
       res.status(400).json({ error: "Invalid sponsorship tier" });
@@ -1015,14 +1179,67 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
 
     const keyId = process.env.RAZORPAY_KEY_ID?.trim();
     const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    if (!keyId || !keySecret) {
-      res.status(503).json({ error: "Payment gateway is not configured" });
+
+    let pricing = getSponsorshipPaymentPlan(parsed.data.tierId);
+    if (!pricing) {
+      res.status(400).json({ error: "Invalid sponsorship tier" });
       return;
     }
 
-    const pricing = getSponsorshipPaymentPlan(parsed.data.tierId);
-    if (!pricing) {
-      res.status(400).json({ error: "Invalid sponsorship tier" });
+    if (resolvedPasscode) {
+      pricing = applyPasscodeToSponsorshipPlan(
+        pricing,
+        resolvedPasscode.discountType,
+        resolvedPasscode.discountValue,
+      );
+    }
+
+    if (pricing.totalPaise === 0) {
+      const db = getDb();
+      if (!db) {
+        res.status(503).json({ error: "Database unavailable" });
+        return;
+      }
+
+      const paymentId = randomUUID();
+      await db.insert(payments).values({
+        id: paymentId,
+        type: "sponsorship",
+        razorpayOrderId: `passcode_free_${paymentId}`,
+        amountPaise: 0,
+        basePaise: 0,
+        gstPaise: 0,
+        status: "paid",
+        metadata: {
+          paymentType: "sponsorship_advance",
+          passcodeId: resolvedPasscode!.id,
+          passcodeCode: resolvedPasscode!.code,
+          tierId: parsed.data.tierId,
+          freePasscodeBypass: true,
+        },
+      });
+      await consumePasscodeIfPresent(resolvedPasscode!.id);
+
+      res.json({
+        freeBypass: true,
+        paymentId,
+        amount: 0,
+        displayAmountPaise: 0,
+        basePaise: 0,
+        gstPaise: 0,
+        totalPaise: 0,
+        isTestCharge: false,
+        currency: "INR",
+        keyId: keyId ?? "",
+        tierName: tier.name,
+        advanceLabel: `${tier.name} — ₹ 0 (referral passcode)`,
+        passcodeId: resolvedPasscode!.id,
+      });
+      return;
+    }
+
+    if (!keyId || !keySecret) {
+      res.status(503).json({ error: "Payment gateway is not configured" });
       return;
     }
 
@@ -1057,6 +1274,12 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
           balanceTotalPaise: String(pricing.balanceTotalInr * 100),
           displayAmountPaise: String(displayAmountPaise),
           isTestCharge: "false",
+          ...(resolvedPasscode
+            ? {
+                passcodeId: resolvedPasscode.id,
+                passcodeCode: resolvedPasscode.code,
+              }
+            : {}),
         },
       }),
     });
@@ -1084,6 +1307,7 @@ export async function postSponsorshipCreateOrder(req: Request, res: Response) {
       keyId,
       tierName: tier.name,
       advanceLabel: `Razorpay payment — ₹ ${pricing.razorpayTotalInr.toLocaleString("en-IN")} incl. ${SPONSORSHIP_GST_PERCENT_LABEL} GST (balance ₹ ${pricing.balanceTotalInr.toLocaleString("en-IN")} via bank transfer)`,
+      ...(resolvedPasscode ? { passcodeId: resolvedPasscode.id } : {}),
     });
   } catch (err) {
     console.error("Sponsorship create-order error:", err);
@@ -1146,6 +1370,7 @@ export async function postSponsorshipPayment(req: Request, res: Response) {
     amountPaise,
     basePaise,
     gstPaise,
+    passcodeId,
   } = parsed.data;
 
   if (!verifyRazorpaySignature(razorpayOrderId, razorpayPaymentId, razorpaySignature)) {
@@ -1233,6 +1458,8 @@ export async function postSponsorshipPayment(req: Request, res: Response) {
     .set({ status: "confirmed", paymentId })
     .where(eq(sponsorshipReservations.id, reservationId));
 
+  await consumePasscodeIfPresent(passcodeId);
+
   res.json({ ok: true, paymentId });
 }
 
@@ -1301,6 +1528,8 @@ export async function postPaymentsWebhook(req: Request, res: Response) {
     .limit(1);
 
   if (existingPayment) {
+    await consumePasscodeFromWebhookNotes(notes as Record<string, unknown>);
+
     const metadata = (existingPayment.metadata ?? {}) as Record<string, unknown>;
     const payerEmail =
       typeof metadata.contactEmail === "string"
@@ -1385,6 +1614,8 @@ export async function postPaymentsWebhook(req: Request, res: Response) {
     status: "paid",
     metadata: paymentMetadata,
   });
+
+  await consumePasscodeFromWebhookNotes(notes as Record<string, unknown>);
 
   if (paymentType === "sponsorship" && typeof notes.reservationId === "string") {
     const [reservation] = await db
