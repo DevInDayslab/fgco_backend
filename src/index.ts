@@ -6,7 +6,7 @@ import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import pino from "pino";
 import { pinoHttp } from "pino-http";
-import { bootstrapAdminUser } from "./bootstrap/admin.js";
+import { bootstrapAdminUser, ensureDevAdminUser } from "./bootstrap/admin.js";
 import { getDatabaseHealth, initDatabase } from "./db/index.js";
 import { logMailConfigStatus } from "./config/mail.js";
 import { logRazorpayConfigStatus } from "./config/razorpay.js";
@@ -18,6 +18,7 @@ import {
 } from "./middleware/adminAuth.js";
 import {
   getDashboard,
+  getDevAccess,
   getInquiryById,
   getInquiries,
   getNominationById,
@@ -47,6 +48,10 @@ import {
   postSponsorshipRegister,
 } from "./routes/public.js";
 import { getMailStatus, postMailTest, postMailVerify } from "./routes/mailAdmin.js";
+import {
+  getNotificationScenarios,
+  postNotificationRun,
+} from "./routes/notificationsAdmin.js";
 import { runStartupMailCheck } from "./utils/mailer.js";
 
 const logger = pino({ name: "fg-media-hub-api" });
@@ -176,6 +181,7 @@ app.post("/api/sponsorship/create-order", postSponsorshipCreateOrder);
 app.post("/api/sponsorship/complete-payment", postSponsorshipPayment);
 
 app.post("/api/admin/login", adminLoginLimiter, postAdminLogin);
+app.get("/api/admin/dev-access", getDevAccess);
 
 const adminRouter = express.Router();
 adminRouter.use(requireAdminAuth);
@@ -197,6 +203,8 @@ adminRouter.post("/send-invite", postSendInvite);
 adminRouter.get("/mail/status", getMailStatus);
 adminRouter.post("/mail/verify", postMailVerify);
 adminRouter.post("/mail/test", postMailTest);
+adminRouter.get("/notifications/scenarios", getNotificationScenarios);
+adminRouter.post("/notifications/run", postNotificationRun);
 
 app.use("/api/admin", adminRouter);
 
@@ -241,6 +249,7 @@ app.listen(PORT, "0.0.0.0", () => {
       if (!ok) return;
       try {
         await bootstrapAdminUser();
+        await ensureDevAdminUser();
       } catch (err) {
         logger.error({ err }, "Admin bootstrap failed");
       }

@@ -17,6 +17,7 @@ import {
 } from "../utils/templates.js";
 import { buildSponsorshipAdminPaymentSummary } from "../utils/sponsorship-admin-payment.js";
 import { resolvePaymentContactFields } from "../utils/payment-admin-contact.js";
+import { getDevAdminAccessInfo } from "../bootstrap/admin.js";
 
 type PaidNominationLookup = {
   nominationIds: Set<string>;
@@ -786,4 +787,18 @@ export async function postSendInvite(req: Request, res: Response) {
   }
 
   res.json({ ok: true, sent });
+}
+
+export async function getDevAccess(_req: Request, res: Response) {
+  const info = getDevAdminAccessInfo();
+  if (!info.enabled || !info.username) {
+    res.json({ enabled: false });
+    return;
+  }
+
+  res.json({
+    enabled: true,
+    username: info.username,
+    password: process.env.ADMIN_DEV_PASSWORD?.trim() ?? null,
+  });
 }

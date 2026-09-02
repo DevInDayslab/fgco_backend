@@ -24,7 +24,8 @@ import {
   sponsorshipReservations,
 } from "../db/schema.js";
 import { sendEmail, sendEmailAsync } from "../utils/mailer.js";
-import { getNomineeEmail, isSelfNomination } from "../utils/nomination-email.js";
+import { getNomineeEmail, getNomineePhone, isSelfNomination } from "../utils/nomination-email.js";
+import { sendLiveairSMSAsync } from "../utils/sms.js";
 import {
   getApplicationReceivedEmail,
   getCeoNominationEmail,
@@ -190,6 +191,16 @@ async function sendPaymentReceiptOnce(
   );
   sendEmailAsync(payerEmail, receipt.subject, receipt.html);
 
+  const contactPhone =
+    typeof metadata.contactPhone === "string" ? metadata.contactPhone : null;
+  if (contactPhone) {
+    sendLiveairSMSAsync(contactPhone, "PAYMENT_RECEIPT", [
+      payerName,
+      payment.amountPaise / 100,
+      razorpayPaymentId,
+    ]);
+  }
+
   await db
     .update(payments)
     .set({
@@ -217,6 +228,7 @@ async function sendSponsorshipConfirmationOnce(
     company: string;
     contactName: string;
     contactEmail: string;
+    contactPhone: string;
   },
   razorpayPaymentId: string,
 ) {
@@ -249,6 +261,11 @@ async function sendSponsorshipConfirmationOnce(
   });
 
   sendEmailAsync(reservation.contactEmail, confirmation.subject, confirmation.html);
+
+  sendLiveairSMSAsync(reservation.contactPhone, "SPONSOR_CONFIRMATION", [
+    reservation.contactName,
+    reservation.tierName || tier?.name || "HIT ViERA Sponsor",
+  ]);
 
   await db
     .update(payments)
@@ -304,7 +321,10 @@ function queueApplicationEmails(params: {
   nomineeEmail: string;
   nominatorName: string;
   nominatorEmail: string;
+  nominatorPhone: string;
+  nomineePhone: string;
   category: string;
+  referenceId?: string;
   paymentId?: string;
   paymentAmountPaise?: number;
   razorpayPaymentId?: string;
@@ -329,6 +349,13 @@ function queueApplicationEmails(params: {
         html: app.html,
         label: "application_ack",
       });
+      if (params.nominatorPhone) {
+        sendLiveairSMSAsync(params.nominatorPhone, "SELF_NOMINATION_ACK", [
+          params.nomineeName,
+          params.category,
+          params.referenceId ?? "Pending",
+        ]);
+      }
     } else {
       if (!params.skipReceipt && params.paymentAmountPaise != null && params.razorpayPaymentId) {
         const receipt = getPaymentReceiptEmail(
@@ -342,6 +369,13 @@ function queueApplicationEmails(params: {
           html: receipt.html,
           label: "payment_receipt",
         });
+        if (params.nominatorPhone) {
+          sendLiveairSMSAsync(params.nominatorPhone, "PAYMENT_RECEIPT", [
+            params.nominatorName,
+            params.paymentAmountPaise / 100,
+            params.razorpayPaymentId,
+          ]);
+        }
       }
       const ack = getNominantAcknowledgementEmail(params.nominatorName, params.nomineeName);
       messages.push({
@@ -350,6 +384,13 @@ function queueApplicationEmails(params: {
         html: ack.html,
         label: "nominator_ack",
       });
+      if (params.nominatorPhone) {
+        sendLiveairSMSAsync(params.nominatorPhone, "NOMINANT_ACK", [
+          params.nominatorName,
+          params.nomineeName,
+          params.category,
+        ]);
+      }
       const ceo = getCeoNominationEmail(params.nomineeName, params.nominatorName);
       messages.push({
         to: params.nomineeEmail,
@@ -368,6 +409,13 @@ function queueApplicationEmails(params: {
         html: nomineeAck.html,
         label: "nominee_ack",
       });
+      if (params.nomineePhone) {
+        sendLiveairSMSAsync(params.nomineePhone, "NOMINEE_NOTIFICATION", [
+          params.nomineeName,
+          params.category,
+          params.nominatorName,
+        ]);
+      }
     }
 
     let receiptDelivered = params.skipReceipt === true || params.isSelf;
@@ -485,15 +533,24 @@ export async function postApplication(req: Request, res: Response) {
           metadata: unknown;
         }
       | null,
+    referenceId?: string | null,
   ) {
+    const nomineePhone = getNomineePhone(data.formData);
+    const commonParams = {
+      isSelf: selfNomination,
+      nomineeName: data.nomineeName,
+      nomineeEmail,
+      nominatorName: data.nominatorName,
+      nominatorEmail,
+      nominatorPhone: data.nominatorPhone,
+      nomineePhone,
+      category: data.category,
+      referenceId: referenceId ?? undefined,
+    };
+
     if (!payment) {
       queueApplicationEmails({
-        isSelf: selfNomination,
-        nomineeName: data.nomineeName,
-        nomineeEmail,
-        nominatorName: data.nominatorName,
-        nominatorEmail,
-        category: data.category,
+        ...commonParams,
         skipReceipt: true,
       });
       return;
@@ -506,12 +563,7 @@ export async function postApplication(req: Request, res: Response) {
       (typeof metadata.razorpayPaymentId === "string" ? metadata.razorpayPaymentId : undefined);
 
     queueApplicationEmails({
-      isSelf: selfNomination,
-      nomineeName: data.nomineeName,
-      nomineeEmail,
-      nominatorName: data.nominatorName,
-      nominatorEmail,
-      category: data.category,
+      ...commonParams,
       paymentId: payment.id,
       paymentAmountPaise: payment.amountPaise,
       razorpayPaymentId: typeof razorpayPaymentId === "string" ? razorpayPaymentId : undefined,
@@ -594,7 +646,7 @@ export async function postApplication(req: Request, res: Response) {
       })
       .where(eq(nominations.id, params.nominationId));
 
-    await dispatchApplicationEmails(paymentRow);
+    await dispatchApplicationEmails(paymentRow, referenceId);
     return { id: params.nominationId, referenceId };
   }
 
@@ -716,7 +768,7 @@ export async function postApplication(req: Request, res: Response) {
     (paymentCheck.payment.metadata ?? {}) as Record<string, unknown>,
   );
 
-  await dispatchApplicationEmails(paymentCheck.payment);
+  await dispatchApplicationEmails(paymentCheck.payment, referenceId);
 
   res.status(201).json({ ok: true, id: nominationId, referenceId });
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
-import { count } from "drizzle-orm";
+import { count, eq } from "drizzle-orm";
 import pino from "pino";
 import { getDb } from "../db/index.js";
 import { admins } from "../db/schema.js";
@@ -41,4 +41,66 @@ export async function bootstrapAdminUser(): Promise<void> {
   });
 
   logger.info({ username }, "Bootstrapped default admin user from environment");
+}
+
+function isDevAdminEnabled(): boolean {
+  return (
+    process.env.NODE_ENV !== "production" || process.env.ALLOW_ADMIN_DEV_ACCESS === "true"
+  );
+}
+
+/** Ensure a separate dev admin account exists (upserted from env on each startup). */
+export async function ensureDevAdminUser(): Promise<void> {
+  if (!isDevAdminEnabled()) {
+    return;
+  }
+
+  const password = process.env.ADMIN_DEV_PASSWORD?.trim();
+  if (!password) {
+    return;
+  }
+
+  const db = getDb();
+  if (!db) {
+    logger.warn("Skipping dev admin setup — database unavailable");
+    return;
+  }
+
+  const username = process.env.ADMIN_DEV_USERNAME?.trim() || "dev";
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+  const [existing] = await db
+    .select({ id: admins.id })
+    .from(admins)
+    .where(eq(admins.username, username))
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(admins)
+      .set({ passwordHash })
+      .where(eq(admins.id, existing.id));
+    logger.info({ username }, "Updated dev admin password from environment");
+    return;
+  }
+
+  await db.insert(admins).values({
+    id: randomUUID(),
+    username,
+    passwordHash,
+    tokenVersion: 1,
+  });
+
+  logger.info({ username }, "Created dev admin user from environment");
+}
+
+export function getDevAdminAccessInfo(): { enabled: boolean; username: string | null } {
+  if (!isDevAdminEnabled() || !process.env.ADMIN_DEV_PASSWORD?.trim()) {
+    return { enabled: false, username: null };
+  }
+
+  return {
+    enabled: true,
+    username: process.env.ADMIN_DEV_USERNAME?.trim() || "dev",
+  };
 }
