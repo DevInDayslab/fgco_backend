@@ -1,9 +1,37 @@
 import { randomUUID } from "node:crypto";
 import type { Request, Response } from "express";
+import { desc } from "drizzle-orm";
 import { z } from "zod";
 import { getDb } from "../db/index.js";
 import { passcodes } from "../db/schema.js";
 import { generateUniquePasscodeCodes } from "../utils/passcode.js";
+
+export async function getAdminPasscodes(_req: Request, res: Response) {
+  const db = getDb();
+  if (!db) {
+    res.status(503).json({ error: "Database unavailable" });
+    return;
+  }
+
+  const rows = await db
+    .select({
+      id: passcodes.id,
+      code: passcodes.code,
+      employeeName: passcodes.employeeName,
+      employeeEmail: passcodes.employeeEmail,
+      employeePhone: passcodes.employeePhone,
+      discountType: passcodes.discountType,
+      discountValue: passcodes.discountValue,
+      isUsed: passcodes.isUsed,
+      usedAt: passcodes.usedAt,
+      batchId: passcodes.batchId,
+      createdAt: passcodes.createdAt,
+    })
+    .from(passcodes)
+    .orderBy(desc(passcodes.createdAt));
+
+  res.json({ items: rows });
+}
 
 const passcodeGenerateSchema = z
   .object({

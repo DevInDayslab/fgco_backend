@@ -48,7 +48,7 @@ import {
   postSponsorshipRegister,
 } from "./routes/public.js";
 import { postPasscodesCheck, postPasscodesValidate } from "./routes/passcodes.js";
-import { postAdminPasscodesGenerate } from "./routes/passcodesAdmin.js";
+import { getAdminPasscodes, postAdminPasscodesGenerate } from "./routes/passcodesAdmin.js";
 import { getMailStatus, postMailTest, postMailVerify } from "./routes/mailAdmin.js";
 import {
   getNotificationScenarios,
@@ -212,6 +212,7 @@ adminRouter.get("/sponsorships/:id", getSponsorshipById);
 adminRouter.patch("/sponsorships/:id", patchSponsorship);
 adminRouter.get("/files", getAdminFile);
 adminRouter.post("/send-invite", postSendInvite);
+adminRouter.get("/passcodes", getAdminPasscodes);
 adminRouter.post("/passcodes/generate", postAdminPasscodesGenerate);
 adminRouter.get("/mail/status", getMailStatus);
 adminRouter.post("/mail/verify", postMailVerify);
